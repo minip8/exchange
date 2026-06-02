@@ -1,4 +1,5 @@
 CompileFlags:
+  CompilationDatabase: build
   Remove:
     - "-fmodule-mapper=*"
     - "-fdeps-format=*"

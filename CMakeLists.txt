@@ -5,44 +5,45 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Flags
+set(SANITIZERS
+    -fsanitize=address
+    -fsanitize=undefined
+    -fsanitize=leak
+)
+
 # Create a virtual target for common compiler options
-add_library(project_options INTERFACE)
-target_compile_options(project_options INTERFACE
+add_library(debug_options INTERFACE)
+target_compile_options(debug_options INTERFACE
     $<$<CONFIG:Debug>:
         -Og -g3 -ggdb -Wall -Wextra
         -Wpedantic -Wshadow
-        -Wconversion -Wpedantic
-        -fsanitize=address
-        -fsanitize=undefined
-        -fsanitize=leak
+        -Wconversion
+        ${SANITIZERS}
         -D_GLIBCXX_DEBUG
     >
 )
-target_link_options(project_options INTERFACE
+target_link_options(debug_options INTERFACE
     $<$<CONFIG:Debug>:
-        -fsanitize=address
-        -fsanitize=undefined
-        -fsanitize=leak
+        ${SANITIZERS}
     >
 )
 
 # Engine
-add_library(engine src/engine/OrderBook.cpp
-    src/engine/MatchingEngine.cpp)
-
-target_sources(engine
-    PUBLIC
-    FILE_SET CXX_MODULES
-    BASE_DIRS modules
-    FILES
-        modules/engine/OrderBook.cppm
-        modules/engine/MatchingEngine.cppm
+add_library(engine
+    src/engine/OrderBook.cpp
+    src/engine/MatchingEngine.cpp
 )
 
-target_link_libraries(engine PUBLIC project_options)
+target_include_directories(engine
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(engine PUBLIC debug_options)
 
 # Create the executable
 add_executable(app src/main.cpp)
 
 # Link the executable with your engine library and the compiler options
-target_link_libraries(app PRIVATE engine project_options)
+target_link_libraries(app PRIVATE engine debug_options)
