@@ -1,3 +1,6 @@
 export module engine.OrderBook;
 
-class OrderBook {};
+export class OrderBook {
+  private:
+  
+};

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.28)
+cmake_minimum_required(VERSION 4.3.3)
 project(exchange)
 
 set(CMAKE_CXX_STANDARD 23)
@@ -11,8 +11,8 @@ target_compile_options(project_options INTERFACE
     $<$<CONFIG:Debug>:
         -Og -g3 -ggdb -Wall -Wextra
         -Wpedantic -Wshadow
-        -Wconversion -Werror
-        -Wpedantic -fsanitize=address
+        -Wconversion -Wpedantic
+        -fsanitize=address
         -fsanitize=undefined
         -fsanitize=leak
         -D_GLIBCXX_DEBUG
@@ -26,13 +26,17 @@ target_link_options(project_options INTERFACE
     >
 )
 
-# OrderBook
-add_library(engine src/engine/OrderBook.cpp)
+# Engine
+add_library(engine src/engine/OrderBook.cpp
+    src/engine/MatchingEngine.cpp)
 
 target_sources(engine
     PUBLIC
-    FILE_SET CXX_MODULES FILES
+    FILE_SET CXX_MODULES
+    BASE_DIRS modules
+    FILES
         modules/engine/OrderBook.cppm
+        modules/engine/MatchingEngine.cppm
 )
 
 target_link_libraries(engine PUBLIC project_options)
