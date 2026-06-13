@@ -8,5 +8,5 @@ struct OrderId {
 
   explicit OrderId(uint64_t v) : value(v) {}
 
-  auto operator<=>(const OrderId&) const = default;
+  std::strong_ordering operator<=>(const OrderId&) const = default;
 };
