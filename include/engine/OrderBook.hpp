@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "engine/Order.hpp"
+#include "types/OrderBookId.hpp"
 #include "types/OrderId.hpp"
 #include "types/OrderPrice.hpp"
 
@@ -18,6 +19,8 @@ class OrderBook {
   OrderBook(OrderBook&&) noexcept;
   OrderBook& operator=(OrderBook&&) noexcept;
   ~OrderBook() noexcept;
+
+  OrderBook(OrderBookId id) : m_id(id) {}
 
   std::vector<Order> addOrder(Order&&) noexcept;
   std::optional<Order> removeOrder(const OrderId&);
@@ -33,6 +36,7 @@ class OrderBook {
                            F match_predicate);
 
  private:
+  OrderBookId m_id;
   std::vector<Order> m_buys{};
   std::vector<Order> m_sells{};
 };
