@@ -1,6 +1,9 @@
 #pragma once
 
 #include "types/OrderId.hpp"
+#include "types/OrderQuantity.hpp"
+#include "types/OrderTime.hpp"
+
 namespace Engine {
 
 class Order {
@@ -15,6 +18,8 @@ class Order {
 
  private:
   OrderId m_id;
+  OrderTime m_time;
+  OrderQuantity m_quantity;
 };
 
 }  // namespace Engine
