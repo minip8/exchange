@@ -20,6 +20,9 @@ class Order {
       : m_id(id), m_time(time), m_quantity(quantity), m_side(side) {}
 
   OrderId id() const { return m_id; };
+  OrderTime time() const { return m_time; };
+  OrderQuantity quantity() const { return m_quantity; }
+  OrderSide side() const { return m_side; }
 
  private:
   OrderId m_id;
