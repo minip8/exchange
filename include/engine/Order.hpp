@@ -5,7 +5,7 @@
 #include "types/OrderTime.hpp"
 
 namespace Exchange::Engine {
-
+using namespace Exchange::Types;
 class Order {
  public:
   Order() = delete;

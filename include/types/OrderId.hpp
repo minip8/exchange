@@ -5,9 +5,10 @@
 
 namespace Exchange::Types {
 struct OrderId {
-  uint64_t value{};
+  using T = uint64_t;
+  T value{};
 
-  explicit OrderId(uint64_t v) : value(v) {}
+  explicit OrderId(T v) : value(v) {}
 
   std::strong_ordering operator<=>(const OrderId&) const = default;
 };

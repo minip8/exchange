@@ -5,9 +5,10 @@
 
 namespace Exchange::Types {
 struct OrderQuantity {
-  uint64_t value{};
+  using T = uint64_t;
+  T value{};
 
-  explicit OrderQuantity(uint64_t v) : value(v) {}
+  explicit OrderQuantity(T v) : value(v) {}
 
   std::strong_ordering operator<=>(const OrderQuantity&) const = default;
 };

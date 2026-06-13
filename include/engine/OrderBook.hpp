@@ -4,8 +4,9 @@
 
 #include "engine/Order.hpp"
 #include "types/OrderId.hpp"
-namespace Exchange::Engine {
 
+namespace Exchange::Engine {
+using namespace Exchange::Types;
 class OrderBook {
  public:
   OrderBook() noexcept;

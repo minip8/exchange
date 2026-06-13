@@ -4,9 +4,10 @@
 
 namespace Exchange::Types {
 struct OrderTime {
-  std::chrono::milliseconds value{};
+  using T = std::chrono::time_point<std::chrono::high_resolution_clock>;
+  T value{};
 
-  explicit OrderTime(std::chrono::milliseconds v) : value(v) {}
+  explicit OrderTime(T v) : value(v) {}
 
   auto operator<=>(const OrderTime&) const = default;
 };
