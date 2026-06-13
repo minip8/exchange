@@ -4,7 +4,7 @@
 #include "types/OrderQuantity.hpp"
 #include "types/OrderTime.hpp"
 
-namespace Engine {
+namespace Exchange::Engine {
 
 class Order {
  public:
@@ -22,4 +22,4 @@ class Order {
   OrderQuantity m_quantity;
 };
 
-}  // namespace Engine
+}  // namespace Exchange::Engine

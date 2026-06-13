@@ -2,6 +2,7 @@
 
 #include <chrono>
 
+namespace Exchange::Types {
 struct OrderTime {
   std::chrono::milliseconds value{};
 
@@ -9,3 +10,4 @@ struct OrderTime {
 
   auto operator<=>(const OrderTime&) const = default;
 };
+}  // namespace Exchange::Types

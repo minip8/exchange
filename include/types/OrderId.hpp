@@ -3,6 +3,7 @@
 #include <compare>
 #include <cstdint>
 
+namespace Exchange::Types {
 struct OrderId {
   uint64_t value{};
 
@@ -10,3 +11,4 @@ struct OrderId {
 
   std::strong_ordering operator<=>(const OrderId&) const = default;
 };
+}  // namespace Exchange::Types

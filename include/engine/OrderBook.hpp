@@ -4,7 +4,7 @@
 
 #include "engine/Order.hpp"
 #include "types/OrderId.hpp"
-namespace Engine {
+namespace Exchange::Engine {
 
 class OrderBook {
  public:
@@ -21,4 +21,4 @@ class OrderBook {
  private:
 };
 
-}  // namespace Engine
+}  // namespace Exchange::Engine
