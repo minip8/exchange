@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <vector>
 
 #include "engine/Order.hpp"
 #include "types/OrderId.hpp"
@@ -16,8 +17,8 @@ class OrderBook {
   OrderBook& operator=(OrderBook&&) noexcept;
   ~OrderBook() noexcept;
 
-  std::optional<Order> addOrder(Order&&);
-  std::optional<Order> removeOrder(const OrderId);
+  std::vector<Order> addOrder(Order&&);
+  std::optional<Order> removeOrder(const OrderId&);
 
  private:
 };
