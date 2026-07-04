@@ -13,12 +13,12 @@ namespace Exchange::Engine {
 using namespace Exchange::Types;
 class OrderBook {
  public:
-  OrderBook() noexcept;
+  OrderBook() noexcept = delete;
   OrderBook(const OrderBook&) = delete;
   OrderBook& operator=(const OrderBook&) = delete;
-  OrderBook(OrderBook&&) noexcept;
-  OrderBook& operator=(OrderBook&&) noexcept;
-  ~OrderBook() noexcept;
+  OrderBook(OrderBook&&) noexcept = default;
+  OrderBook& operator=(OrderBook&&) noexcept = default;
+  ~OrderBook() noexcept = default;
 
   OrderBook(OrderBookId id) : m_id(id) {}
 
