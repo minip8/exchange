@@ -12,8 +12,9 @@ class Order {
   Order() = delete;
   Order(const Order&) = delete;
   Order& operator=(const Order&) = delete;
-  Order(Order&&) noexcept;
-  Order& operator=(Order&&) noexcept;
+  Order(Order&&) noexcept = default;
+  Order& operator=(Order&&) noexcept = default;
+  ~Order() noexcept = default;
 
   explicit Order(OrderId id, OrderTime time, OrderQuantity quantity,
                  OrderSide side)

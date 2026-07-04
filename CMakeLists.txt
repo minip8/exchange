@@ -33,6 +33,7 @@ target_link_options(debug_options INTERFACE
 add_library(engine
     src/engine/OrderBook.cpp
     src/engine/MatchingEngine.cpp
+    src/engine/Order.cpp
 )
 
 target_include_directories(engine
