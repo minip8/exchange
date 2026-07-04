@@ -30,9 +30,9 @@ class OrderBook {
  private:
   template <typename F>
     requires std::invocable<F, OrderPrice, OrderPrice>
-  std::vector<Order> match(const std::vector<Order>& left_orders,
-                           const std::vector<Order>& right_orders,
-                           const Order& left_order, const Order& right_order,
+  std::vector<Order> match(std::vector<Order>& left_orders,
+                           std::vector<Order>& right_orders,
+                           const Order& left_order,
                            F match_predicate);
 
  private:
