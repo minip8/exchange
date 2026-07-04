@@ -24,8 +24,8 @@ class OrderBook {
 
   std::vector<Order> addOrder(Order&&) noexcept;
   std::optional<Order> removeOrder(const OrderId&);
-  const std::vector<Order>& buys() const noexcept { return m_buys; }
-  const std::vector<Order>& sells() const noexcept { return m_sells; }
+  std::span<const Order> buys() const noexcept { return m_buys; }
+  std::span<const Order> sells() const noexcept { return m_sells; }
 
  private:
   template <typename F>
