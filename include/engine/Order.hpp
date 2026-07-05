@@ -31,6 +31,8 @@ class Order {
   OrderQuantity quantity() const { return m_quantity; }
   OrderSide side() const { return m_side; }
 
+  void setQuantity(OrderQuantity quantity) { m_quantity = quantity; }
+
  private:
   OrderId m_id;
   OrderPrice m_price;
