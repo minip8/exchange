@@ -8,8 +8,8 @@
 
 namespace Exchange::Engine {
 using namespace Exchange::Types;
-class Order {
- public:
+struct Order {
+  //  public:
   Order() = delete;
   Order(const Order&) = delete;
   Order& operator=(const Order&) = delete;
@@ -19,26 +19,13 @@ class Order {
 
   explicit Order(OrderId id, OrderPrice price, OrderTime time,
                  OrderQuantity quantity, OrderSide side)
-      : m_id(id),
-        m_price(price),
-        m_time(time),
-        m_quantity(quantity),
-        m_side(side) {}
+      : id(id), price(price), time(time), quantity(quantity), side(side) {}
 
-  OrderId id() const { return m_id; };
-  OrderPrice price() const { return m_price; }
-  OrderTime time() const { return m_time; };
-  OrderQuantity quantity() const { return m_quantity; }
-  OrderSide side() const { return m_side; }
-
-  void setQuantity(OrderQuantity quantity) { m_quantity = quantity; }
-
- private:
-  OrderId m_id;
-  OrderPrice m_price;
-  OrderTime m_time;
-  OrderQuantity m_quantity;
-  OrderSide m_side;
+  OrderId id;
+  OrderPrice price;
+  OrderTime time;
+  OrderQuantity quantity;
+  OrderSide side;
 };
 
 }  // namespace Exchange::Engine
