@@ -16,7 +16,7 @@ class MatchingEngine {
   ~MatchingEngine() noexcept = default;
 
   void processOrder(Order order) {
-    OrderBook& order_book{m_id_to_book[order.id()]};
+    OrderBook& order_book{m_id_to_book[order.id]};
     order_book.addOrder(std::move(order));
   }
 
