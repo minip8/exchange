@@ -36,7 +36,9 @@ class OrderBook {
   std::optional<Fill> match(
       Order& aggressing_order, Order& resting_order,
       std::function_ref<bool(Order& aggressing_order, Order& resting_order)>
-          match_predicate);
+          match_predicate) const;
+
+  void tryInsertResting(Order) noexcept;
 
  private:
   using match_predicate_t =

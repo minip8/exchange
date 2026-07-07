@@ -24,21 +24,7 @@ std::vector<Fill> OrderBook::addOrder(Order aggressing_order) noexcept {
         return match(m_buys, aggressing_order, m_match_sell_aggressor);
     }
   }()};
-  if (aggressing_order.quantity > OrderQuantity{0}) {
-    switch (aggressing_order.side) {
-      case Types::OrderSide::Buy:
-        m_buys.insert(
-            std::ranges::upper_bound(m_buys, aggressing_order.price,
-                                     std::ranges::greater{}, &Order::price),
-            std::move(aggressing_order));
-
-      case Types::OrderSide::Sell:
-        m_buys.insert(
-            std::ranges::upper_bound(m_buys, aggressing_order.price,
-                                     std::ranges::less{}, &Order::price),
-            std::move(aggressing_order));
-    }
-  }
+  tryInsertResting(std::move(aggressing_order));
   return fills;
 }
 std::vector<Fill> OrderBook::match(std::vector<Order>& resting_orders,
@@ -65,14 +51,13 @@ std::vector<Fill> OrderBook::match(std::vector<Order>& resting_orders,
 
   return fills;
 }
-
 /*
 Assumes positive order quantity.
 Mutates the orders to reflect their updated quantities.
 */
 std::optional<Fill> OrderBook::match(Order& aggressing_order,
                                      Order& resting_order,
-                                     match_predicate_t match_predicate) {
+                                     match_predicate_t match_predicate) const {
   if (match_predicate(aggressing_order, resting_order)) {
     OrderQuantity quantity_to_match{
         std::min(aggressing_order.quantity, resting_order.quantity)};
@@ -91,4 +76,24 @@ std::optional<Fill> OrderBook::match(Order& aggressing_order,
   }
   return {};
 }
+void OrderBook::tryInsertResting(Order order) noexcept {
+  if (order.quantity > OrderQuantity{0}) {
+    switch (order.side) {
+      case Types::OrderSide::Buy:
+        m_buys.insert(
+            std::ranges::upper_bound(m_buys, order.price,
+                                     std::ranges::greater{}, &Order::price),
+            std::move(order));
+        break;
+
+      case Types::OrderSide::Sell:
+        m_sells.insert(
+            std::ranges::upper_bound(m_sells, order.price, std::ranges::less{},
+                                     &Order::price),
+            std::move(order));
+        break;
+    }
+  }
+}
+
 }  // namespace Exchange::Engine
