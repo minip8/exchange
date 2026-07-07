@@ -76,7 +76,7 @@ std::optional<Fill> OrderBook::match(Order& aggressing_order,
   }
   return {};
 }
-void OrderBook::tryInsertResting(Order order) noexcept {
+void OrderBook::tryInsertResting(Order&& order) noexcept {
   if (order.quantity > OrderQuantity{0}) {
     switch (order.side) {
       case Types::OrderSide::Buy:
