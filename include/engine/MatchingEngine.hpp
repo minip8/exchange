@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <unordered_map>
 
 #include "engine/Order.hpp"
@@ -18,6 +19,11 @@ class MatchingEngine {
   void addOrder(Order order) {
     OrderBook& order_book{m_id_to_book[order.id]};
     order_book.addOrder(std::move(order));
+  }
+
+  std::optional<Order> removeOrder(const OrderId& order_id) {
+    OrderBook& order_book{m_id_to_book[order_id]};
+    return order_book.removeOrder(order_id);
   }
 
  private:
