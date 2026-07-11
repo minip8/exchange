@@ -3,11 +3,12 @@
 #include <concepts>
 #include <expected>
 #include <functional>
-#include <optional>
 #include <string_view>
 #include <type_traits>
 #include <unordered_map>
+#include <vector>
 
+#include "engine/Fill.hpp"
 #include "engine/Order.hpp"
 #include "engine/OrderBook.hpp"
 #include "types/OrderBookId.hpp"
@@ -35,8 +36,8 @@ class MatchingEngine {
   std::expected<std::reference_wrapper<OrderBook>, std::string_view>
   getOrderBook(const OrderBookId&);
 
-  std::expected<void, std::string_view> addOrder(const OrderBookId&,
-                                                 Order order);
+  std::expected<std::vector<Fill>, std::string_view> addOrder(
+      const OrderBookId&, Order order);
 
   std::expected<Order, std::string_view> removeOrder(const OrderId& order_id);
 
@@ -51,7 +52,7 @@ class MatchingEngine {
                        std::string_view> {
     auto order_book_id_it{self.m_order_id_to_order_book_id.find(order_id)};
     if (order_book_id_it == self.m_order_id_to_order_book_id.end()) {
-      return {};
+      return std::unexpected("OrderId not found");
     }
     return self.getOrderBook(order_book_id_it->second);
   }
@@ -63,7 +64,7 @@ class MatchingEngine {
                        std::string_view> {
     auto order_book_it{self.m_order_book_id_to_order_book.find(order_book_id)};
     if (order_book_it == self.m_order_book_id_to_order_book.end()) {
-      return {};
+      return std::unexpected("OrderBookId not found");
     }
     return order_book_it->second;
   }

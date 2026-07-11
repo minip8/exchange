@@ -6,6 +6,7 @@
 #include <functional>
 #include <optional>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "engine/Fill.hpp"
@@ -24,6 +25,8 @@ std::vector<Fill> OrderBook::addOrder(Order aggressing_order) noexcept {
         return match(m_sells, aggressing_order, m_match_buy_aggressor);
       case Types::OrderSide::Sell:
         return match(m_buys, aggressing_order, m_match_sell_aggressor);
+      default:
+        std::unreachable();
     }
   }()};
   tryInsertResting(std::move(aggressing_order));
