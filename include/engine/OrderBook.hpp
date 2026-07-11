@@ -1,7 +1,9 @@
 #pragma once
 
+#include <expected>
 #include <functional>
 #include <optional>
+#include <string_view>
 #include <vector>
 
 #include "engine/Fill.hpp"
@@ -23,7 +25,7 @@ class OrderBook {
   OrderBook(OrderBookId id) : m_id(id) {}
 
   std::vector<Fill> addOrder(Order) noexcept;
-  std::optional<Order> removeOrder(const OrderId&);
+  std::expected<Order, std::string_view> removeOrder(const OrderId&);
   std::span<const Order> buys() const noexcept { return m_buys; }
   std::span<const Order> sells() const noexcept { return m_sells; }
 

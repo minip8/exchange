@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <expected>
 #include <functional>
 #include <optional>
+#include <string_view>
 #include <vector>
 
 #include "engine/Fill.hpp"
@@ -95,25 +97,27 @@ void OrderBook::tryInsertResting(Order&& order) noexcept {
     }
   }
 }
-std::optional<Order> OrderBook::removeOrder(const OrderId& order_id) {
-  auto try_erase{[&order_id](std::vector<Order>& container, auto& it) {
+std::expected<Order, std::string_view> OrderBook::removeOrder(
+    const OrderId& order_id) {
+  auto try_erase = [&order_id](
+                       std::vector<Order>& container,
+                       auto it) -> std::expected<Order, std::string_view> {
     if (it == container.end() || it->id != order_id) {
-      return std::optional<Order>(std::nullopt);
+      return std::unexpected("Order not found");
     }
     Order value{std::move(*it)};
     container.erase(it);
-    return std::optional<Order>(std::move(value));
-  }};
-  if (auto it{std::ranges::lower_bound(m_buys, order_id, {}, &Order::id)};
-      auto value{try_erase(m_buys, it)}) {
     return value;
+  };
+
+  auto buy_it = std::ranges::lower_bound(m_buys, order_id, {}, &Order::id);
+  if (auto result = try_erase(m_buys, buy_it); result) {
+    return result;
   }
-  if (auto it{std::ranges::lower_bound(m_sells, order_id,
-                                       std::ranges::greater{}, &Order::id)};
-      auto value{try_erase(m_sells, it)}) {
-    return value;
-  }
-  return {};
+
+  auto sell_it = std::ranges::lower_bound(m_sells, order_id,
+                                          std::ranges::greater{}, &Order::id);
+  return try_erase(m_sells, sell_it);
 }
 
 }  // namespace Exchange::Engine

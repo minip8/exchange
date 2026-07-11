@@ -35,9 +35,10 @@ class MatchingEngine {
   std::expected<std::reference_wrapper<OrderBook>, std::string_view>
   getOrderBook(const OrderBookId&);
 
-  std::expected<void, std::string_view> addOrder(const OrderBookId&, Order order);
+  std::expected<void, std::string_view> addOrder(const OrderBookId&,
+                                                 Order order);
 
-  std::optional<Order> removeOrder(const OrderId& order_id);
+  std::expected<Order, std::string_view> removeOrder(const OrderId& order_id);
 
   // OrderBookId addOrderBook();
 

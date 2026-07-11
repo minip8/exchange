@@ -38,7 +38,8 @@ std::expected<void, std::string_view> MatchingEngine::addOrder(
       });
 }
 
-std::optional<Order> MatchingEngine::removeOrder(const OrderId& order_id) {
+std::expected<Order, std::string_view> MatchingEngine::removeOrder(
+    const OrderId& order_id) {
   OrderBookId order_book_id{m_order_id_to_order_book_id[order_id]};
   OrderBook& order_book{m_order_book_id_to_order_book[order_book_id]};
   return order_book.removeOrder(order_id);
