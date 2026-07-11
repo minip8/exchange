@@ -9,17 +9,16 @@
 namespace Exchange::Engine {
 using namespace Exchange::Types;
 struct Order {
-  //  public:
-  Order() = delete;
-  Order(const Order&) = delete;
-  Order& operator=(const Order&) = delete;
-  Order(Order&&) noexcept = default;
-  Order& operator=(Order&&) noexcept = default;
-  ~Order() noexcept = default;
+  // Order() = delete;
+  // Order(const Order&) = delete;
+  // Order& operator=(const Order&) = delete;
+  // Order(Order&&) noexcept = default;
+  // Order& operator=(Order&&) noexcept = default;
+  // ~Order() noexcept = default;
 
-  explicit Order(OrderId id, OrderPrice price, OrderTime time,
-                 OrderQuantity quantity, OrderSide side)
-      : id(id), price(price), time(time), quantity(quantity), side(side) {}
+  // explicit Order(OrderId id, OrderPrice price, OrderTime time,
+  //                OrderQuantity quantity, OrderSide side)
+  //     : id(id), price(price), time(time), quantity(quantity), side(side) {}
 
   OrderId id;
   OrderPrice price;
