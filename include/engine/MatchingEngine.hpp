@@ -1,11 +1,18 @@
 #pragma once
 
+#include <concepts>
+#include <expected>
+#include <functional>
 #include <optional>
+#include <string_view>
+#include <type_traits>
 #include <unordered_map>
 
 #include "engine/Order.hpp"
 #include "engine/OrderBook.hpp"
+#include "types/OrderBookId.hpp"
 #include "types/OrderId.hpp"
+
 namespace Exchange::Engine {
 class MatchingEngine {
  public:
@@ -16,17 +23,52 @@ class MatchingEngine {
   MatchingEngine& operator=(MatchingEngine&&) noexcept = default;
   ~MatchingEngine() noexcept = default;
 
-  void addOrder(Order order) {
-    OrderBook& order_book{m_id_to_book[order.id]};
-    order_book.addOrder(std::move(order));
+  std::expected<std::reference_wrapper<const OrderBook>, std::string_view>
+  getOrderBook(const OrderId&) const;
+
+  std::expected<std::reference_wrapper<const OrderBook>, std::string_view>
+  getOrderBook(const OrderBookId&) const;
+
+  std::expected<std::reference_wrapper<OrderBook>, std::string_view>
+  getOrderBook(const OrderId&);
+
+  std::expected<std::reference_wrapper<OrderBook>, std::string_view>
+  getOrderBook(const OrderBookId&);
+
+  std::expected<void, std::string_view> addOrder(const OrderBookId&, Order order);
+
+  std::optional<Order> removeOrder(const OrderId& order_id);
+
+  // OrderBookId addOrderBook();
+
+ private:
+  template <typename Self = MatchingEngine>
+    requires std::same_as<std::remove_const_t<Self>, MatchingEngine>
+  static auto getOrderBookImpl(Self& self, const OrderId& order_id)
+      -> std::expected<std::reference_wrapper<std::conditional_t<
+                           std::is_const_v<Self>, const OrderBook, OrderBook>>,
+                       std::string_view> {
+    auto order_book_id_it{self.m_order_id_to_order_book_id.find(order_id)};
+    if (order_book_id_it == self.m_order_id_to_order_book_id.end()) {
+      return {};
+    }
+    return self.getOrderBook(order_book_id_it->second);
   }
 
-  std::optional<Order> removeOrder(const OrderId& order_id) {
-    OrderBook& order_book{m_id_to_book[order_id]};
-    return order_book.removeOrder(order_id);
+  template <typename Self = MatchingEngine>
+  static auto getOrderBookImpl(Self& self, const OrderBookId& order_book_id)
+      -> std::expected<std::reference_wrapper<std::conditional_t<
+                           std::is_const_v<Self>, const OrderBook, OrderBook>>,
+                       std::string_view> {
+    auto order_book_it{self.m_order_book_id_to_order_book.find(order_book_id)};
+    if (order_book_it == self.m_order_book_id_to_order_book.end()) {
+      return {};
+    }
+    return order_book_it->second;
   }
 
  private:
-  std::unordered_map<OrderId, OrderBook> m_id_to_book;
+  std::unordered_map<OrderId, OrderBookId> m_order_id_to_order_book_id;
+  std::unordered_map<OrderBookId, OrderBook> m_order_book_id_to_order_book;
 };
 }  // namespace Exchange::Engine
