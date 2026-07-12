@@ -15,14 +15,14 @@ namespace Exchange::Engine {
 using namespace Exchange::Types;
 class OrderBook {
  public:
-  OrderBook() noexcept = delete;
+  //   OrderBook() noexcept = delete;
   OrderBook(const OrderBook&) = delete;
   OrderBook& operator=(const OrderBook&) = delete;
   OrderBook(OrderBook&&) noexcept = default;
   OrderBook& operator=(OrderBook&&) noexcept = default;
   ~OrderBook() noexcept = default;
 
-  OrderBook(OrderBookId id) : m_id(id) {}
+  OrderBook() noexcept : m_id(instance_count) { ++instance_count; }
 
   std::vector<Fill> addOrder(Order) noexcept;
   std::expected<Order, std::string_view> removeOrder(const OrderId&);
@@ -59,5 +59,8 @@ class OrderBook {
   OrderBookId m_id;
   std::vector<Order> m_buys{};
   std::vector<Order> m_sells{};
+
+ private:
+  static inline OrderBookId::T instance_count{};
 };
 }  // namespace Exchange::Engine
