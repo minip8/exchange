@@ -8,7 +8,7 @@ struct OrderQuantity {
   using T = uint64_t;
   T value{};
 
-  OrderQuantity(T v) : value(v) {}
+  explicit OrderQuantity(T v) : value(v) {}
 
   std::strong_ordering operator<=>(const OrderQuantity&) const = default;
 

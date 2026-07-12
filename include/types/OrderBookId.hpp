@@ -9,7 +9,7 @@ struct OrderBookId {
   using T = uint64_t;
   T value{};
 
-  OrderBookId(T v) : value(v) {}
+  explicit OrderBookId(T v) : value(v) {}
 
   std::strong_ordering operator<=>(const OrderBookId&) const = default;
 };

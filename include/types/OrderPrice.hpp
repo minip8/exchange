@@ -8,7 +8,7 @@ struct OrderPrice {
   using T = uint64_t;
   T value{};
 
-  OrderPrice(T v) : value(v) {}
+  explicit OrderPrice(T v) : value(v) {}
 
   std::strong_ordering operator<=>(const OrderPrice&) const = default;
 };
