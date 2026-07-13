@@ -28,6 +28,7 @@ class OrderBook {
   std::expected<Order, std::string_view> removeOrder(const OrderId&);
   std::span<const Order> buys() const noexcept { return m_buys; }
   std::span<const Order> sells() const noexcept { return m_sells; }
+  OrderBookId id() const noexcept { return m_id; }
 
  private:
   std::vector<Fill> match(
@@ -52,7 +53,7 @@ class OrderBook {
       }};
   match_predicate_t m_match_sell_aggressor{
       [](const Order& aggressing_order, const Order& resting_order) {
-        return aggressing_order.price >= resting_order.price;
+        return aggressing_order.price <= resting_order.price;
       }};
 
  private:

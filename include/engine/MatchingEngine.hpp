@@ -37,11 +37,11 @@ class MatchingEngine {
   getOrderBook(const OrderBookId&);
 
   std::expected<std::vector<Fill>, std::string_view> addOrder(
-      const OrderBookId&, Order order);
+      const OrderBookId&, Order&& order);
 
   std::expected<Order, std::string_view> removeOrder(const OrderId& order_id);
 
-  // OrderBookId addOrderBook();
+  void addOrderBook(OrderBook&&);
 
  private:
   template <typename Self = MatchingEngine>

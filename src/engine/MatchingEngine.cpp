@@ -32,7 +32,7 @@ MatchingEngine::getOrderBook(const OrderBookId& order_book_id) {
 }
 
 std::expected<std::vector<Fill>, std::string_view> MatchingEngine::addOrder(
-    const OrderBookId& order_book_id, Order order) {
+    const OrderBookId& order_book_id, Order&& order) {
   return getOrderBook(order_book_id)
       .and_then([&order](OrderBook& order_book)
                     -> std::expected<std::vector<Fill>, std::string_view> {
@@ -47,5 +47,9 @@ std::expected<Order, std::string_view> MatchingEngine::removeOrder(
           OrderBook& order_book) -> std::expected<Order, std::string_view> {
         return order_book.removeOrder(order_id);
       });
+}
+
+void MatchingEngine::addOrderBook(OrderBook&& order_book) {
+  m_order_book_id_to_order_book[order_book.id()] = std::move(order_book);
 }
 }  // namespace Exchange::Engine
