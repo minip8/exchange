@@ -113,13 +113,12 @@ std::expected<Order, std::string_view> OrderBook::removeOrder(
     return value;
   };
 
-  auto buy_it = std::ranges::lower_bound(m_buys, order_id, {}, &Order::id);
+  auto buy_it = std::ranges::find(m_buys, order_id, &Order::id);
   if (auto result = try_erase(m_buys, buy_it); result) {
     return result;
   }
 
-  auto sell_it = std::ranges::lower_bound(m_sells, order_id,
-                                          std::ranges::greater{}, &Order::id);
+  auto sell_it = std::ranges::find(m_sells, order_id, &Order::id);
   return try_erase(m_sells, sell_it);
 }
 
