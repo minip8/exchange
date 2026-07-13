@@ -48,3 +48,6 @@ add_executable(app src/main.cpp)
 
 # Link the executable with your engine library and the compiler options
 target_link_libraries(app PRIVATE engine debug_options)
+
+# Benchmarking
+add_subdirectory(bench)
