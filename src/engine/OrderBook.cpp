@@ -11,6 +11,8 @@
 
 #include "engine/Fill.hpp"
 #include "engine/Order.hpp"
+#include "engine/PriceLevel.hpp"
+#include "types/OrderPrice.hpp"
 #include "types/OrderQuantity.hpp"
 #include "types/OrderSide.hpp"
 
@@ -22,14 +24,24 @@ std::vector<Fill> OrderBook::addOrder(Order&& aggressing_order) noexcept {
   std::vector<Fill> fills{[&] {
     switch (aggressing_order.side) {
       case Types::OrderSide::Buy:
-        return match(m_sells, aggressing_order, m_match_buy_aggressor);
+        return match(m_sell_levels, aggressing_order, m_match_buy_aggressor);
       case Types::OrderSide::Sell:
-        return match(m_buys, aggressing_order, m_match_sell_aggressor);
+        return match(m_buy_levels, aggressing_order, m_match_sell_aggressor);
       default:
         std::unreachable();
     }
   }()};
-  tryInsertResting(std::move(aggressing_order));
+  tryInsertRestingOrder(std::move(aggressing_order));
+  return fills;
+}
+std::vector<Fill> OrderBook::match(std::vector<PriceLevel>& resting_levels,
+                                   Order& aggressing_order,
+                                   match_predicate_t match_predicate) {
+  std::vector<Fill> fills{};
+  for (PriceLevel& level : resting_levels) {
+    auto level_fills{match(level.orders, aggressing_order, match_predicate)};
+    fills.insert(fills.end(), level_fills.begin(), level_fills.end());
+  }
   return fills;
 }
 std::vector<Fill> OrderBook::match(std::vector<Order>& resting_orders,
@@ -39,7 +51,7 @@ std::vector<Fill> OrderBook::match(std::vector<Order>& resting_orders,
   OrderQuantity quantity_matched{0};
   long fully_filled_count{0};
 
-  while (!resting_orders.empty() &&
+  while (static_cast<size_t>(fully_filled_count) < resting_orders.size() &&
          aggressing_order.quantity > OrderQuantity{0}) {
     Order& resting_order =
         resting_orders[static_cast<size_t>(fully_filled_count)];
@@ -81,45 +93,81 @@ std::optional<Fill> OrderBook::match(Order& aggressing_order,
   }
   return {};
 }
-void OrderBook::tryInsertResting(Order&& order) noexcept {
+void OrderBook::tryInsertRestingOrder(Order&& order) {
   if (order.quantity > OrderQuantity{0}) {
+    m_order_id_to_side_and_price[order.id] = {order.side, order.price};
     switch (order.side) {
-      case Types::OrderSide::Buy:
-        m_buys.insert(
-            std::ranges::upper_bound(m_buys, order.price,
-                                     std::ranges::greater{}, &Order::price),
-            std::move(order));
-        break;
+      case Types::OrderSide::Buy: {
+        auto level_it{tryInsertPriceLevel<Types::OrderSide::Buy>(order.price)};
+        auto& level_orders{level_it->orders};
+        level_orders.push_back(std::move(order));
+      } break;
 
-      case Types::OrderSide::Sell:
-        m_sells.insert(
-            std::ranges::upper_bound(m_sells, order.price, std::ranges::less{},
-                                     &Order::price),
-            std::move(order));
-        break;
+      case Types::OrderSide::Sell: {
+        auto level_it{tryInsertPriceLevel<Types::OrderSide::Sell>(order.price)};
+        auto& level_orders{level_it->orders};
+        level_orders.push_back(std::move(order));
+      } break;
     }
   }
 }
 std::expected<Order, std::string_view> OrderBook::removeOrder(
     const OrderId& order_id) {
-  auto try_erase = [&order_id](
-                       std::vector<Order>& container,
-                       auto it) -> std::expected<Order, std::string_view> {
-    if (it == container.end() || it->id != order_id) {
+  auto try_erase = [&order_id, this](std::vector<Order>& orders)
+      -> std::expected<Order, std::string_view> {
+    auto it{std::ranges::find(orders, order_id, &Order::id)};
+    if (it == orders.end()) {
       return std::unexpected("Order not found");
     }
     Order value{std::move(*it)};
-    container.erase(it);
+    orders.erase(it);
+    m_order_id_to_side_and_price.erase(order_id);
     return value;
   };
 
-  auto buy_it = std::ranges::find(m_buys, order_id, &Order::id);
-  if (auto result = try_erase(m_buys, buy_it); result) {
-    return result;
+  auto order_price_it{m_order_id_to_side_and_price.find(order_id)};
+  if (order_price_it == m_order_id_to_side_and_price.end()) {
+    return std::unexpected("Order not found");
   }
 
-  auto sell_it = std::ranges::find(m_sells, order_id, &Order::id);
-  return try_erase(m_sells, sell_it);
-}
+  const auto& [order_side, order_price]{order_price_it->second};
 
+  if (order_side == Types::OrderSide::Buy) {
+    auto& buy_orders{
+        std::ranges::find(m_buy_levels, order_price, &PriceLevel::price)
+            ->orders};
+    return try_erase(buy_orders);
+  } else {
+    auto& sell_orders{
+        std::ranges::find(m_sell_levels, order_price, &PriceLevel::price)
+            ->orders};
+    return try_erase(sell_orders);
+  }
+}
+template <>
+std::vector<PriceLevel>::iterator
+OrderBook::tryInsertPriceLevel<OrderSide::Buy>(const OrderPrice order_price) {
+  auto level_it{std::ranges::lower_bound(
+      m_buy_levels, order_price, std::ranges::less{}, &PriceLevel::price)};
+
+  if (level_it == m_buy_levels.end() || level_it->price != order_price) {
+    return m_buy_levels.insert(level_it,
+                               PriceLevel{.price = order_price, .orders = {}});
+  } else {
+    return level_it;
+  }
+}
+template <>
+std::vector<PriceLevel>::iterator
+OrderBook::tryInsertPriceLevel<OrderSide::Sell>(const OrderPrice order_price) {
+  auto level_it{std::ranges::lower_bound(
+      m_sell_levels, order_price, std::ranges::greater{}, &PriceLevel::price)};
+
+  if (level_it == m_sell_levels.end() || level_it->price != order_price) {
+    return m_sell_levels.insert(level_it,
+                                PriceLevel{.price = order_price, .orders = {}});
+  } else {
+    return level_it;
+  }
+}
 }  // namespace Exchange::Engine
