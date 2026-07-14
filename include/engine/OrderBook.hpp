@@ -24,7 +24,7 @@ class OrderBook {
 
   OrderBook() noexcept : m_id(instance_count) { ++instance_count; }
 
-  std::vector<Fill> addOrder(Order) noexcept;
+  std::vector<Fill> addOrder(Order&&) noexcept;
   std::expected<Order, std::string_view> removeOrder(const OrderId&);
   std::span<const Order> buys() const noexcept { return m_buys; }
   std::span<const Order> sells() const noexcept { return m_sells; }

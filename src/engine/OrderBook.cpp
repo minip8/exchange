@@ -18,7 +18,7 @@ namespace Exchange::Engine {
 /*
 Assumes that addOrder is called on orders that are in increasing order of time.
 */
-std::vector<Fill> OrderBook::addOrder(Order aggressing_order) noexcept {
+std::vector<Fill> OrderBook::addOrder(Order&& aggressing_order) noexcept {
   std::vector<Fill> fills{[&] {
     switch (aggressing_order.side) {
       case Types::OrderSide::Buy:
