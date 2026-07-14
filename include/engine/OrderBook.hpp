@@ -65,19 +65,12 @@ class OrderBook {
   template <OrderSide>
   std::vector<PriceLevel>::iterator tryInsertPriceLevel(const OrderPrice);
 
-  template <>
-  std::vector<PriceLevel>::iterator tryInsertPriceLevel<OrderSide::Buy>(
-      const OrderPrice);
-
-  template <>
-  std::vector<PriceLevel>::iterator tryInsertPriceLevel<OrderSide::Sell>(
-      const OrderPrice);
-
  private:
   OrderBookId m_id;
   std::vector<PriceLevel> m_buy_levels{};
   std::vector<PriceLevel> m_sell_levels{};
-  std::unordered_map<OrderId, std::pair<OrderSide, OrderPrice>> m_order_id_to_side_and_price{};
+  std::unordered_map<OrderId, std::pair<OrderSide, OrderPrice>>
+      m_order_id_to_side_and_price{};
 
  private:
   static inline OrderBookId::T instance_count{};

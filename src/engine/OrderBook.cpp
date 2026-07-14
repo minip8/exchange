@@ -17,6 +17,32 @@
 #include "types/OrderSide.hpp"
 
 namespace Exchange::Engine {
+template <>
+std::vector<PriceLevel>::iterator
+OrderBook::tryInsertPriceLevel<OrderSide::Buy>(const OrderPrice order_price) {
+  auto level_it{std::ranges::lower_bound(
+      m_buy_levels, order_price, std::ranges::less{}, &PriceLevel::price)};
+
+  if (level_it == m_buy_levels.end() || level_it->price != order_price) {
+    return m_buy_levels.insert(level_it,
+                               PriceLevel{.price = order_price, .orders = {}});
+  } else {
+    return level_it;
+  }
+}
+template <>
+std::vector<PriceLevel>::iterator
+OrderBook::tryInsertPriceLevel<OrderSide::Sell>(const OrderPrice order_price) {
+  auto level_it{std::ranges::lower_bound(
+      m_sell_levels, order_price, std::ranges::greater{}, &PriceLevel::price)};
+
+  if (level_it == m_sell_levels.end() || level_it->price != order_price) {
+    return m_sell_levels.insert(level_it,
+                                PriceLevel{.price = order_price, .orders = {}});
+  } else {
+    return level_it;
+  }
+}
 /*
 Assumes that addOrder is called on orders that are in increasing order of time.
 */
@@ -95,7 +121,7 @@ std::optional<Fill> OrderBook::match(Order& aggressing_order,
 }
 void OrderBook::tryInsertRestingOrder(Order&& order) {
   if (order.quantity > OrderQuantity{0}) {
-    m_order_id_to_side_and_price[order.id] = {order.side, order.price};
+    m_order_id_to_side_and_price.insert_or_assign(order.id, std::make_pair(order.side, order.price));
     switch (order.side) {
       case Types::OrderSide::Buy: {
         auto level_it{tryInsertPriceLevel<Types::OrderSide::Buy>(order.price)};
@@ -142,32 +168,6 @@ std::expected<Order, std::string_view> OrderBook::removeOrder(
         std::ranges::find(m_sell_levels, order_price, &PriceLevel::price)
             ->orders};
     return try_erase(sell_orders);
-  }
-}
-template <>
-std::vector<PriceLevel>::iterator
-OrderBook::tryInsertPriceLevel<OrderSide::Buy>(const OrderPrice order_price) {
-  auto level_it{std::ranges::lower_bound(
-      m_buy_levels, order_price, std::ranges::less{}, &PriceLevel::price)};
-
-  if (level_it == m_buy_levels.end() || level_it->price != order_price) {
-    return m_buy_levels.insert(level_it,
-                               PriceLevel{.price = order_price, .orders = {}});
-  } else {
-    return level_it;
-  }
-}
-template <>
-std::vector<PriceLevel>::iterator
-OrderBook::tryInsertPriceLevel<OrderSide::Sell>(const OrderPrice order_price) {
-  auto level_it{std::ranges::lower_bound(
-      m_sell_levels, order_price, std::ranges::greater{}, &PriceLevel::price)};
-
-  if (level_it == m_sell_levels.end() || level_it->price != order_price) {
-    return m_sell_levels.insert(level_it,
-                                PriceLevel{.price = order_price, .orders = {}});
-  } else {
-    return level_it;
   }
 }
 }  // namespace Exchange::Engine
