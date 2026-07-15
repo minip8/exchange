@@ -65,6 +65,18 @@ class OrderBook {
   template <OrderSide>
   std::vector<PriceLevel>::iterator tryInsertPriceLevel(const OrderPrice);
 
+  template <OrderSide>
+  std::vector<PriceLevel>::iterator priceLevelIterator(const OrderPrice) const;
+
+  template <OrderSide>
+  std::vector<PriceLevel>::iterator priceLevelIterator(const OrderPrice);
+
+  template <OrderSide side, typename Self>
+  auto priceLevelIteratorImpl(this Self& self, const OrderPrice order_price)
+      -> std::conditional_t<std::is_const_v<Self>,
+                            std::vector<PriceLevel>::const_iterator,
+                            std::vector<PriceLevel>::iterator>;
+
  private:
   OrderBookId m_id;
   std::vector<PriceLevel> m_buy_levels{};
@@ -75,4 +87,22 @@ class OrderBook {
  private:
   static inline OrderBookId::T instance_count{};
 };
+template <OrderSide side, typename Self>
+auto OrderBook::priceLevelIteratorImpl(this Self& self,
+                                   const OrderPrice order_price)
+    -> std::conditional_t<std::is_const_v<Self>,
+                          std::vector<PriceLevel>::const_iterator,
+                          std::vector<PriceLevel>::iterator> {
+  if constexpr (side == Types::OrderSide::Buy) {
+    return std::ranges::find_if(self.m_buy_levels,
+                                [order_price](const PriceLevel& price_level) {
+                                  return price_level.price <= order_price;
+                                });
+  } else if constexpr (side == Types::OrderSide::Sell) {
+    return std::ranges::find_if(self.m_sell_levels,
+                                [order_price](const PriceLevel& price_level) {
+                                  return price_level.price >= order_price;
+                                });
+  }
+}
 }  // namespace Exchange::Engine

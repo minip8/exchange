@@ -17,11 +17,20 @@
 #include "types/OrderSide.hpp"
 
 namespace Exchange::Engine {
+template <OrderSide side>
+std::vector<PriceLevel>::iterator OrderBook::priceLevelIterator(
+    const OrderPrice order_price) const {
+  return priceLevelIteratorImpl<side>(order_price);
+}
+template <OrderSide side>
+std::vector<PriceLevel>::iterator OrderBook::priceLevelIterator(
+    const OrderPrice order_price) {
+  return priceLevelIteratorImpl<side>(order_price);
+}
 template <>
 std::vector<PriceLevel>::iterator
 OrderBook::tryInsertPriceLevel<OrderSide::Buy>(const OrderPrice order_price) {
-  auto level_it{std::ranges::lower_bound(
-      m_buy_levels, order_price, std::ranges::less{}, &PriceLevel::price)};
+  auto level_it{priceLevelIterator<OrderSide::Buy>(order_price)};
 
   if (level_it == m_buy_levels.end() || level_it->price != order_price) {
     return m_buy_levels.insert(level_it,
@@ -33,8 +42,7 @@ OrderBook::tryInsertPriceLevel<OrderSide::Buy>(const OrderPrice order_price) {
 template <>
 std::vector<PriceLevel>::iterator
 OrderBook::tryInsertPriceLevel<OrderSide::Sell>(const OrderPrice order_price) {
-  auto level_it{std::ranges::lower_bound(
-      m_sell_levels, order_price, std::ranges::greater{}, &PriceLevel::price)};
+  auto level_it{priceLevelIterator<OrderSide::Sell>(order_price)};
 
   if (level_it == m_sell_levels.end() || level_it->price != order_price) {
     return m_sell_levels.insert(level_it,
