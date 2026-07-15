@@ -65,7 +65,9 @@ std::vector<Fill> OrderBook::match(std::vector<PriceLevel>& resting_levels,
                                    match_predicate_t match_predicate) {
   std::vector<Fill> fills{};
   for (PriceLevel& level : resting_levels) {
+    if (level.orders.empty()) continue;
     auto level_fills{match(level.orders, aggressing_order, match_predicate)};
+    if (level_fills.empty()) break;
     fills.insert(fills.end(), level_fills.begin(), level_fills.end());
   }
   return fills;
