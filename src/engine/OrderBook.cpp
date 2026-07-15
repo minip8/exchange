@@ -121,7 +121,8 @@ std::optional<Fill> OrderBook::match(Order& aggressing_order,
 }
 void OrderBook::tryInsertRestingOrder(Order&& order) {
   if (order.quantity > OrderQuantity{0}) {
-    m_order_id_to_side_and_price.insert_or_assign(order.id, std::make_pair(order.side, order.price));
+    m_order_id_to_side_and_price.insert_or_assign(
+        order.id, std::make_pair(order.side, order.price));
     switch (order.side) {
       case Types::OrderSide::Buy: {
         auto level_it{tryInsertPriceLevel<Types::OrderSide::Buy>(order.price)};
@@ -159,14 +160,22 @@ std::expected<Order, std::string_view> OrderBook::removeOrder(
   const auto& [order_side, order_price]{order_price_it->second};
 
   if (order_side == Types::OrderSide::Buy) {
-    auto& buy_orders{
-        std::ranges::find(m_buy_levels, order_price, &PriceLevel::price)
-            ->orders};
+    auto& buy_orders{std::ranges::find_if(
+                         m_buy_levels,
+                         [order_price](OrderPrice element) {
+                           return element <= order_price;
+                         },
+                         &PriceLevel::price)
+                         ->orders};
     return try_erase(buy_orders);
   } else {
-    auto& sell_orders{
-        std::ranges::find(m_sell_levels, order_price, &PriceLevel::price)
-            ->orders};
+    auto& sell_orders{std::ranges::find_if(
+                          m_sell_levels,
+                          [order_price](OrderPrice element) {
+                            return element >= order_price;
+                          },
+                          &PriceLevel::price)
+                          ->orders};
     return try_erase(sell_orders);
   }
 }
