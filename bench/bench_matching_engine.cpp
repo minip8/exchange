@@ -67,7 +67,7 @@ static void BM_MatchingEngine_RemoveOrder(benchmark::State& state) {
   for (std::size_t i = 0; i < depth; ++i) {
     Order o{OrderPrice{kMid - 1}, makeTime(i), OrderQuantity{100},
              OrderSide::Buy};
-    engine.addOrder(book_id, std::move(o));
+    auto _ = engine.addOrder(book_id, std::move(o));
   }
 
   // One "churn" order added (untimed) and removed (timed) per iteration —
@@ -79,7 +79,7 @@ static void BM_MatchingEngine_RemoveOrder(benchmark::State& state) {
     Order churn{OrderPrice{kMid - 1}, makeTime(churn_time++),
                 OrderQuantity{100}, OrderSide::Buy};
     const OrderId id = churn.id;
-    engine.addOrder(book_id, std::move(churn));
+    auto _ = engine.addOrder(book_id, std::move(churn));
     state.ResumeTiming();
 
     auto removed = engine.removeOrder(id);
@@ -103,7 +103,7 @@ static void BM_MatchingEngine_GetOrderBook_ByOrderId(benchmark::State& state) {
   Order o{OrderPrice{kMid - 1}, makeTime(0), OrderQuantity{100},
            OrderSide::Buy};
   const OrderId id = o.id;
-  engine.addOrder(book_id, std::move(o));
+  auto _ = engine.addOrder(book_id, std::move(o));
 
   for (auto _ : state) {
     auto result = engine.getOrderBook(id);

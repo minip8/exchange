@@ -114,7 +114,7 @@ static void BM_OrderBook_AddOrder_NoMatch_WithDepth(benchmark::State& state) {
     benchmark::DoNotOptimize(fills);
 
     state.PauseTiming();
-    book.removeOrder(id);
+    auto _ = book.removeOrder(id);
     state.ResumeTiming();
   }
 }
