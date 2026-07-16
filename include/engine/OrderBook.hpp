@@ -3,7 +3,6 @@
 #include <expected>
 #include <functional>
 #include <optional>
-#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -11,6 +10,7 @@
 #include "engine/Fill.hpp"
 #include "engine/Order.hpp"
 #include "engine/PriceLevel.hpp"
+#include "types/EngineError.hpp"
 #include "types/OrderBookId.hpp"
 #include "types/OrderId.hpp"
 #include "types/OrderPrice.hpp"
@@ -43,7 +43,7 @@ class OrderBook {
   OrderBook() noexcept : m_id(instance_count) { ++instance_count; }
 
   std::vector<Fill> addOrder(Order&&) noexcept;
-  std::expected<Order, std::string_view> removeOrder(const OrderId&);
+  std::expected<Order, EngineError> removeOrder(const OrderId&);
   std::span<const PriceLevel> buys() const noexcept { return m_buy_levels; }
   std::span<const PriceLevel> sells() const noexcept { return m_sell_levels; }
   OrderBookId id() const noexcept { return m_id; }
@@ -89,7 +89,7 @@ class OrderBook {
 };
 template <OrderSide side, typename Self>
 auto OrderBook::priceLevelIteratorImpl(this Self& self,
-                                   const OrderPrice order_price)
+                                       const OrderPrice order_price)
     -> std::conditional_t<std::is_const_v<Self>,
                           std::vector<PriceLevel>::const_iterator,
                           std::vector<PriceLevel>::iterator> {

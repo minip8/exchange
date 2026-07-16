@@ -5,13 +5,13 @@
 #include <expected>
 #include <functional>
 #include <optional>
-#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "engine/Fill.hpp"
 #include "engine/Order.hpp"
 #include "engine/PriceLevel.hpp"
+#include "types/EngineError.hpp"
 #include "types/OrderPrice.hpp"
 #include "types/OrderQuantity.hpp"
 #include "types/OrderSide.hpp"
@@ -148,13 +148,14 @@ void OrderBook::tryInsertRestingOrder(Order&& order) {
     }
   }
 }
-std::expected<Order, std::string_view> OrderBook::removeOrder(
+std::expected<Order, EngineError> OrderBook::removeOrder(
     const OrderId& order_id) {
-  auto try_erase = [&order_id, this](std::vector<Order>& orders)
-      -> std::expected<Order, std::string_view> {
+  auto try_erase =
+      [&order_id,
+       this](std::vector<Order>& orders) -> std::expected<Order, EngineError> {
     auto it{std::ranges::find(orders, order_id, &Order::id)};
     if (it == orders.end()) {
-      return std::unexpected("Order not found");
+      return std::unexpected(EngineError::OrderNotFound);
     }
     Order value{std::move(*it)};
     orders.erase(it);
@@ -164,7 +165,7 @@ std::expected<Order, std::string_view> OrderBook::removeOrder(
 
   auto order_price_it{m_order_id_to_side_and_price.find(order_id)};
   if (order_price_it == m_order_id_to_side_and_price.end()) {
-    return std::unexpected("Order not found");
+    return std::unexpected(EngineError::OrderNotFound);
   }
 
   const auto& [order_side, order_price]{order_price_it->second};
