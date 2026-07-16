@@ -50,6 +50,6 @@ std::expected<Order, std::string_view> MatchingEngine::removeOrder(
 }
 
 void MatchingEngine::addOrderBook(OrderBook&& order_book) {
-  m_order_book_id_to_order_book[order_book.id()] = std::move(order_book);
+  m_order_book_id_to_order_book.insert_or_assign(order_book.id(), std::move(order_book));
 }
 }  // namespace Exchange::Engine
