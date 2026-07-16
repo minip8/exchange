@@ -170,22 +170,10 @@ std::expected<Order, std::string_view> OrderBook::removeOrder(
   const auto& [order_side, order_price]{order_price_it->second};
 
   if (order_side == Types::OrderSide::Buy) {
-    auto& buy_orders{std::ranges::find_if(
-                         m_buy_levels,
-                         [order_price](OrderPrice element) {
-                           return element <= order_price;
-                         },
-                         &PriceLevel::price)
-                         ->orders};
+    auto& buy_orders{priceLevelIterator<OrderSide::Buy>(order_price)->orders};
     return try_erase(buy_orders);
   } else {
-    auto& sell_orders{std::ranges::find_if(
-                          m_sell_levels,
-                          [order_price](OrderPrice element) {
-                            return element >= order_price;
-                          },
-                          &PriceLevel::price)
-                          ->orders};
+    auto& sell_orders{priceLevelIterator<OrderSide::Sell>(order_price)->orders};
     return try_erase(sell_orders);
   }
 }
