@@ -22,5 +22,5 @@ int main() {
           Types::OrderQuantity{3},
           Types::OrderSide{Exchange::Types::OrderSide::Buy},
       });
-      std::cout << 0 << '\n';
+  std::cout << 0 << '\n';
 }
