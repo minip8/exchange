@@ -44,6 +44,7 @@ class OrderBook {
 
   std::vector<Fill> addOrder(Order&&) noexcept;
   std::expected<Order, EngineError> removeOrder(const OrderId&);
+  std::expected<std::vector<Fill>, EngineError> modifyOrder(const OrderId&);
   std::span<const PriceLevel> buys() const noexcept { return m_buy_levels; }
   std::span<const PriceLevel> sells() const noexcept { return m_sell_levels; }
   OrderBookId id() const noexcept { return m_id; }

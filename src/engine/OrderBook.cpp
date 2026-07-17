@@ -12,6 +12,7 @@
 #include "engine/Order.hpp"
 #include "engine/PriceLevel.hpp"
 #include "types/EngineError.hpp"
+#include "types/OrderId.hpp"
 #include "types/OrderPrice.hpp"
 #include "types/OrderQuantity.hpp"
 #include "types/OrderSide.hpp"
@@ -176,6 +177,15 @@ std::expected<Order, EngineError> OrderBook::removeOrder(
   } else {
     auto& sell_orders{priceLevelIterator<OrderSide::Sell>(order_price)->orders};
     return try_erase(sell_orders);
+  }
+}
+std::expected<std::vector<Fill>, EngineError> OrderBook::modifyOrder(
+    const OrderId& order_id) {
+  auto expected_order{removeOrder(order_id)};
+  if (expected_order.has_value()) {
+    return addOrder(std::move(expected_order.value()));
+  } else {
+    return std::unexpected(expected_order.error());
   }
 }
 }  // namespace Exchange::Engine
