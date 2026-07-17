@@ -48,6 +48,15 @@ std::expected<Order, EngineError> MatchingEngine::removeOrder(
       });
 }
 
+std::expected<std::vector<Fill>, EngineError> MatchingEngine::modifyOrder(
+    const OrderId& order_id) {
+  return getOrderBook(order_id).and_then(
+      [&order_id](OrderBook& order_book)
+          -> std::expected<std::vector<Fill>, EngineError> {
+        return order_book.modifyOrder(order_id);
+      });
+}
+
 void MatchingEngine::addOrderBook(OrderBook&& order_book) {
   m_order_book_id_to_order_book.insert_or_assign(order_book.id(),
                                                  std::move(order_book));

@@ -41,6 +41,8 @@ class MatchingEngine {
 
   std::expected<Order, EngineError> removeOrder(const OrderId& order_id);
 
+  std::expected<std::vector<Fill>, EngineError> modifyOrder(const OrderId&);
+
   void addOrderBook(OrderBook&&);
 
  private:
