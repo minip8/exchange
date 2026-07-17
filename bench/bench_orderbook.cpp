@@ -13,175 +13,177 @@
 using namespace Exchange::Engine;
 using namespace Exchange::Types;
 
-// ASSUMPTION: OrderQuantity/OrderTime follow the same explicit-T-value
-// pattern as OrderPrice. OrderSide is assumed to be `enum class Side {
-// Buy, Sell }` (or similar). Adjust the three lines below if the real
-// API differs — everything else is agnostic to that.
 namespace {
 
-// OrderTime wraps std::chrono::time_point<high_resolution_clock>, not a raw
-// integer. Build increasing, deterministic timestamps off an arbitrary but
-// fixed epoch offset so ordering is stable across benchmark runs.
-OrderTime makeTime(uint64_t i) {
-  return OrderTime{OrderTime::T{std::chrono::nanoseconds{i}}};
+OrderTime now() { return OrderTime{std::chrono::high_resolution_clock::now()}; }
+
+// Builds a book with `depth` non-crossing price levels on each side,
+// centered around 10'000, so a benchmark can start from a realistic
+// (not empty) book state.
+OrderBook makeBookWithDepth(std::size_t depth) {
+  OrderBook book;
+  for (std::size_t i = 0; i < depth; ++i) {
+    book.addOrder(Order{OrderPrice{10'000 - i}, now(), OrderQuantity{100},
+                        OrderSide::Buy});
+    book.addOrder(Order{OrderPrice{10'001 + i}, now(), OrderQuantity{100},
+                        OrderSide::Sell});
+  }
+  return book;
 }
 
-std::vector<Order> makeRestingBuys(std::size_t n, uint64_t mid_price) {
-  std::vector<Order> orders;
-  orders.reserve(n);
-  std::mt19937_64 rng(42);  // fixed seed: reproducible across runs
-  std::normal_distribution<double> price_jitter(0.0, 25.0);
-
-  for (std::size_t i = 0; i < n; ++i) {
-    auto jitter = static_cast<int64_t>(price_jitter(rng));
-    uint64_t price = mid_price - 1 - static_cast<uint64_t>(std::max<int64_t>(0, jitter));
-    orders.emplace_back(OrderPrice{price}, makeTime(i), OrderQuantity{100},
-                         OrderSide::Buy);
-  }
-  return orders;
-}
-
-std::vector<Order> makeNonCrossingSells(std::size_t n, uint64_t mid_price) {
-  std::vector<Order> orders;
-  orders.reserve(n);
-  std::mt19937_64 rng(43);
-  std::normal_distribution<double> price_jitter(0.0, 25.0);
-
-  for (std::size_t i = 0; i < n; ++i) {
-    auto jitter = static_cast<int64_t>(price_jitter(rng));
-    uint64_t price = mid_price + 1 + static_cast<uint64_t>(std::max<int64_t>(0, jitter));
-    orders.emplace_back(OrderPrice{price}, makeTime(i), OrderQuantity{100},
-                         OrderSide::Sell);
-  }
-  return orders;
+// Deterministic seed so results are comparable across runs/CI.
+std::mt19937_64& rng() {
+  static std::mt19937_64 gen{42};
+  return gen;
 }
 
 }  // namespace
 
-// -----------------------------------------------------------------------
-// Insert-only path: every order rests, nothing crosses. Isolates the cost
-// of OrderBook's insertion/bookkeeping with the match loop doing no work.
-// -----------------------------------------------------------------------
-static void BM_OrderBook_AddOrder_NoMatch(benchmark::State& state) {
-  constexpr uint64_t kMid = 10'000;
-
+// ---------------------------------------------------------------------
+// Insert: order rests (no match), book empty.
+// Measures pure "add a resting order to an empty book" cost.
+// ---------------------------------------------------------------------
+static void BM_AddOrder_NoMatch_EmptyBook(benchmark::State& state) {
   for (auto _ : state) {
     state.PauseTiming();
     OrderBook book;
-    auto orders = makeRestingBuys(1, kMid);
     state.ResumeTiming();
 
-    auto fills = book.addOrder(std::move(orders[0]));
+    auto fills = book.addOrder(
+        Order{OrderPrice{10'000}, now(), OrderQuantity{100}, OrderSide::Buy});
     benchmark::DoNotOptimize(fills);
   }
 }
-BENCHMARK(BM_OrderBook_AddOrder_NoMatch);
+BENCHMARK(BM_AddOrder_NoMatch_EmptyBook);
 
-// -----------------------------------------------------------------------
-// Insert into a pre-populated book (no cross): measures cost as a function
-// of resting book depth on the *opposite* side (shouldn't matter) and same
-// side (tests whatever insertion structure OrderBook uses internally).
-// -----------------------------------------------------------------------
-static void BM_OrderBook_AddOrder_NoMatch_WithDepth(benchmark::State& state) {
+// ---------------------------------------------------------------------
+// Insert into a book with existing depth, still non-crossing.
+// `state.range(0)` is the number of pre-populated price levels per side.
+// Because your price-level lookup is a linear std::ranges::find_if over
+// a std::vector<PriceLevel>, this should show ~O(depth) growth — that's
+// the key thing this benchmark is meant to surface.
+// ---------------------------------------------------------------------
+static void BM_AddOrder_NoMatch_AtDepth(benchmark::State& state) {
   const auto depth = static_cast<std::size_t>(state.range(0));
-  constexpr uint64_t kMid = 10'000;
-
-  OrderBook book;
-  for (auto& o : makeRestingBuys(depth, kMid)) {
-    book.addOrder(std::move(o));
-  }
-
-  // Each iteration inserts one probe order, times that insert, then removes
-  // it (untimed) before the next iteration. Without the removal, depth
-  // grows by one per iteration — and since Benchmark auto-scales to
-  // hundreds of thousands of iterations for a sub-microsecond op, every
-  // run of this benchmark (regardless of the starting `depth` arg) ends up
-  // converging toward roughly the same large size, which is what made the
-  // original version look falsely flat across depth 10..10000.
-  uint64_t churn_time = depth;
-  std::mt19937_64 rng(99);
-  std::normal_distribution<double> price_jitter(0.0, 25.0);
-
-  for (auto _ : state) {
-    auto jitter = static_cast<int64_t>(price_jitter(rng));
-    uint64_t price =
-        kMid - 1 - static_cast<uint64_t>(std::max<int64_t>(0, jitter));
-    Order probe{OrderPrice{price}, makeTime(churn_time++), OrderQuantity{100},
-                OrderSide::Buy};
-    const OrderId id = probe.id;
-
-    auto fills = book.addOrder(std::move(probe));
-    benchmark::DoNotOptimize(fills);
-
-    state.PauseTiming();
-    auto _ = book.removeOrder(id);
-    state.ResumeTiming();
-  }
-}
-BENCHMARK(BM_OrderBook_AddOrder_NoMatch_WithDepth)
-    ->Arg(10)
-    ->Arg(100)
-    ->Arg(1000)
-    ->Arg(10000);
-
-// -----------------------------------------------------------------------
-// Crossing path: pre-load resting sells, then send an aggressing buy that
-// matches one resting order. Isolates match() cost.
-//
-// NOTE: relies on m_match_buy_aggressor / m_match_sell_aggressor being
-// correct for both sides. See flagged predicate issue in OrderBook.hpp —
-// if sell-side crossing is broken, this benchmark's "match" variant for
-// sell aggressors will silently degrade into the no-match path.
-// -----------------------------------------------------------------------
-static void BM_OrderBook_AddOrder_SingleMatch(benchmark::State& state) {
-  constexpr uint64_t kMid = 10'000;
 
   for (auto _ : state) {
     state.PauseTiming();
-    OrderBook book;
-    // One resting sell at the touch.
-    auto resting = makeNonCrossingSells(1, kMid - 1);  // price = kMid
-    book.addOrder(std::move(resting[0]));
-    // Aggressing buy priced to cross it.
-    Order aggressor{OrderPrice{kMid + 5}, makeTime(1), OrderQuantity{100},
-                     OrderSide::Buy};
+    OrderBook book = makeBookWithDepth(depth);
     state.ResumeTiming();
 
-    auto fills = book.addOrder(std::move(aggressor));
+    // Price sits one tick worse than best bid -> new level, worst case
+    // for a linear scan (has to walk past every existing level).
+    auto fills = book.addOrder(Order{OrderPrice{10'000 - depth}, now(),
+                                     OrderQuantity{100}, OrderSide::Buy});
+    benchmark::DoNotOptimize(fills);
+  }
+  state.SetComplexityN(static_cast<int64_t>(depth));
+}
+BENCHMARK(BM_AddOrder_NoMatch_AtDepth)
+    ->RangeMultiplier(4)
+    ->Range(1, 4096)
+    ->Complexity();
+
+// ---------------------------------------------------------------------
+// Insert that crosses the book and matches immediately (full fill
+// against top of book). Isolates matching/fill-generation cost from
+// insertion cost.
+// ---------------------------------------------------------------------
+static void BM_AddOrder_Match_TopOfBook(benchmark::State& state) {
+  for (auto _ : state) {
+    state.PauseTiming();
+    OrderBook book = makeBookWithDepth(10);
+    state.ResumeTiming();
+
+    // Aggressive buy that crosses the best offer.
+    auto fills = book.addOrder(
+        Order{OrderPrice{10'050}, now(), OrderQuantity{100}, OrderSide::Buy});
     benchmark::DoNotOptimize(fills);
   }
 }
-BENCHMARK(BM_OrderBook_AddOrder_SingleMatch);
+BENCHMARK(BM_AddOrder_Match_TopOfBook);
 
-// -----------------------------------------------------------------------
-// Cancel path.
-// -----------------------------------------------------------------------
-static void BM_OrderBook_RemoveOrder(benchmark::State& state) {
+// ---------------------------------------------------------------------
+// Insert that sweeps through multiple price levels before resting
+// (or fully filling). This stresses the matching loop, not just the
+// single-level match path.
+// ---------------------------------------------------------------------
+static void BM_AddOrder_Match_SweepLevels(benchmark::State& state) {
+  const auto levels_to_sweep = static_cast<std::size_t>(state.range(0));
+
+  for (auto _ : state) {
+    state.PauseTiming();
+    OrderBook book = makeBookWithDepth(levels_to_sweep + 5);
+    state.ResumeTiming();
+
+    // Large aggressive buy priced to walk through `levels_to_sweep`
+    // sell levels.
+    auto fills = book.addOrder(
+        Order{OrderPrice{10'001 + levels_to_sweep}, now(),
+              OrderQuantity{100 * levels_to_sweep}, OrderSide::Buy});
+    benchmark::DoNotOptimize(fills);
+  }
+  state.SetComplexityN(static_cast<int64_t>(levels_to_sweep));
+}
+BENCHMARK(BM_AddOrder_Match_SweepLevels)
+    ->RangeMultiplier(2)
+    ->Range(1, 256)
+    ->Complexity();
+
+// ---------------------------------------------------------------------
+// Cancel: remove an existing resting order by id.
+// Book depth is varied since removeOrder has to find the order's price
+// level too.
+// ---------------------------------------------------------------------
+static void BM_RemoveOrder_AtDepth(benchmark::State& state) {
   const auto depth = static_cast<std::size_t>(state.range(0));
-  constexpr uint64_t kMid = 10'000;
 
-  OrderBook book;
-  // Static resting depth — held constant, never removed, just there so
-  // removeOrder has to operate against a book of this size.
-  for (auto& o : makeRestingBuys(depth, kMid)) {
-    book.addOrder(std::move(o));
-  }
-
-  // One "churn" order is added (untimed) and then removed (timed) each
-  // iteration. This avoids ever running out of ids — Benchmark picks the
-  // iteration count dynamically and will happily run far more than `depth`
-  // iterations, which is what caused the original version to error out.
-  uint64_t churn_time = depth;
   for (auto _ : state) {
     state.PauseTiming();
-    Order churn{OrderPrice{kMid - 1}, makeTime(churn_time++),
-                OrderQuantity{100}, OrderSide::Buy};
-    const OrderId id = churn.id;
-    book.addOrder(std::move(churn));
+    OrderBook book = makeBookWithDepth(depth);
+    // Remember an id we know is resting (first buy order added has id 0
+    // only if this is the first OrderBook ever constructed in the
+    // process -- safer to fetch it from the book's own state instead of
+    // assuming ids).
+    auto buys = book.buys();
+    OrderId target_id =
+        buys.empty() ? OrderId{0} : buys.front().orders.front().id;
     state.ResumeTiming();
 
-    auto removed = book.removeOrder(id);
+    auto removed = book.removeOrder(target_id);
     benchmark::DoNotOptimize(removed);
   }
+  state.SetComplexityN(static_cast<int64_t>(depth));
 }
-BENCHMARK(BM_OrderBook_RemoveOrder)->Arg(1000)->Arg(10000);
+BENCHMARK(BM_RemoveOrder_AtDepth)
+    ->RangeMultiplier(4)
+    ->Range(1, 4096)
+    ->Complexity();
+
+// ---------------------------------------------------------------------
+// Sustained mixed workload: repeated add/cancel churn at a fixed depth,
+// approximating realistic order flow (mostly adds and cancels near the
+// top of book, occasional matches). This is the throughput number worth
+// tracking release-over-release.
+// ---------------------------------------------------------------------
+static void BM_MixedWorkload_SteadyState(benchmark::State& state) {
+  std::uniform_int_distribution<int> side_dist(0, 1);
+  std::uniform_int_distribution<uint64_t> price_jitter(0, 20);
+
+  for (auto _ : state) {
+    state.PauseTiming();
+    OrderBook book = makeBookWithDepth(50);
+    state.ResumeTiming();
+
+    for (int i = 0; i < 1000; ++i) {
+      const bool is_buy = side_dist(rng()) == 0;
+      const auto jitter = price_jitter(rng());
+      auto fills = book.addOrder(
+          Order{OrderPrice{is_buy ? 10'000 - jitter : 10'001 + jitter}, now(),
+                OrderQuantity{10}, is_buy ? OrderSide::Buy : OrderSide::Sell});
+      benchmark::DoNotOptimize(fills);
+    }
+  }
+  state.SetItemsProcessed(state.iterations() * 1000);
+}
+BENCHMARK(BM_MixedWorkload_SteadyState)->Unit(benchmark::kMicrosecond);
