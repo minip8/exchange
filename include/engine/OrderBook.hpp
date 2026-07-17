@@ -20,8 +20,8 @@ namespace Exchange::Engine {
 using namespace Exchange::Types;
 class OrderBook {
  private:
-  using match_predicate_t =
-      std::function_ref<bool(const Order& aggressing_order, const Order& resting_order)>;
+  using match_predicate_t = std::function_ref<bool(
+      const Order& aggressing_order, const Order& resting_order)>;
 
   match_predicate_t m_match_buy_aggressor{
       [](const Order& aggressing_order, const Order& resting_order) {
