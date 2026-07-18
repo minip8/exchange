@@ -8,30 +8,35 @@ A single-threaded, in-memory limit-order-book matching engine written in **C++26
 
 ## Build & Run
 
-The build uses **CMake + Ninja** with **g++** (see `build/CMakeCache.txt`). C++26 with `-fexperimental-library`-level features (`std::expected`, `std::print`, `std::function_ref`, explicit object parameters / "deducing `this`").
+The build uses **CMake + Ninja Multi-Config** with **g++** (see `build/CMakeCache.txt`). C++26 with `-fexperimental-library`-level features (`std::expected`, `std::print`, `std::function_ref`, explicit object parameters / "deducing `this`").
+
+Because the generator is **Ninja Multi-Config**, `CMAKE_BUILD_TYPE` is unset and has no effect — configs are selected at *build* time with `--config`, and artifacts land in a per-config subdirectory (`build/Debug/`, `build/Release/`). `Debug` is the default config and enables ASan/UBSan/LSan + `_GLIBCXX_DEBUG`.
 
 ```bash
-# Configure (Debug is the intended default — enables ASan/UBSan/LSan + _GLIBCXX_DEBUG)
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+# Configure once — both Debug and Release configs are set up by this single step
+cmake -S . -B build -G "Ninja Multi-Config"
 
-# Build everything
+# Build everything (defaults to Debug)
 cmake --build build
+cmake --build build --config Release
 
 # Run the smoke-test executable
-./build/app
+./build/Debug/app
 
-# Build & run benchmarks (compiled with -O3 -march=native regardless of build type)
-cmake --build build --target exchange_bench
-./build/bench/exchange_bench
+# Build & run benchmarks
+cmake --build build --config Release --target exchange_bench
+./build/bench/Release/exchange_bench
 
 # Run a single benchmark by name (regex)
-./build/bench/exchange_bench --benchmark_filter='BM_AddOrder.*'
+./build/bench/Release/exchange_bench --benchmark_filter='BM_AddOrder.*'
 
 # JSON output for regression gating (see bench/CMakeLists.txt for the intended CI flow)
-./build/bench/exchange_bench --benchmark_format=json > bench_results.json
+./build/bench/Release/exchange_bench --benchmark_format=json > bench_results.json
 ```
 
-There is **no unit-test suite** — correctness is currently exercised only via `src/main.cpp` and the benchmarks. `Debug` builds carry the sanitizers, so run benches in a non-Debug config (`-DCMAKE_BUILD_TYPE=Release`) when measuring, but keep Debug for development so ASan/UBSan catch bugs.
+There is **no unit-test suite** — correctness is currently exercised only via `src/main.cpp` and the benchmarks.
+
+**Always benchmark the Release config.** `exchange_bench` sets `-O3 -march=native` on itself in every config, but it links `engine`, which propagates `debug_options` as a PUBLIC dependency — so the Debug bench binary is still built with ASan/UBSan/LSan and `_GLIBCXX_DEBUG`. Optimized *and* sanitized numbers are meaningless. Keep Debug for development so the sanitizers catch bugs.
 
 Formatting: `.clang-format` is `BasedOnStyle: Google` (2-space indent). Run `clang-format -i` on changed files.
 
