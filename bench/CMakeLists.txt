@@ -29,3 +29,7 @@ target_compile_options(exchange_bench PRIVATE
 # Regression gate example (wire into CI):
 #   ./exchange_bench --benchmark_format=json > bench_results.json
 #   compare against a checked-in baseline with google/benchmark's compare.py
+
+# flash1-dev/matching-engine-benchmark adapter (skipped until the harness is
+# fetched — see scripts/fetch_harness.sh).
+add_subdirectory(flash1)
