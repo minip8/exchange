@@ -100,6 +100,13 @@ std::vector<Fill> OrderBook::match(std::vector<Order>& resting_orders,
         static_cast<long>(resting_order.quantity == OrderQuantity{0});
   }
 
+  // The fully-filled resting orders are no longer in the book, so drop them
+  // from the id index before erasing them from the level.
+  for (long i{0}; i < fully_filled_count; ++i) {
+    m_order_id_to_side_and_price.erase(
+        resting_orders[static_cast<size_t>(i)].id);
+  }
+
   resting_orders.erase(resting_orders.begin(),
                        resting_orders.begin() + fully_filled_count);
 
@@ -178,6 +185,9 @@ std::expected<Order, EngineError> OrderBook::removeOrder(
     auto& sell_orders{priceLevelIterator<OrderSide::Sell>(order_price)->orders};
     return try_erase(sell_orders);
   }
+}
+bool OrderBook::contains(const OrderId& order_id) const noexcept {
+  return m_order_id_to_side_and_price.contains(order_id);
 }
 std::expected<std::vector<Fill>, EngineError> OrderBook::modifyOrder(
     const OrderId& order_id) {
