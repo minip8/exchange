@@ -34,8 +34,14 @@ require_adapter() {
 cmd="${1:-}"
 case "${cmd}" in
   build)
-    # Dedicated Release tree: the default build/ is Debug (sanitizers), and
-    # perf numbers must come from an optimized, sanitizer-free build.
+    # Dedicated single-config Release tree, deliberately NOT the shared build/.
+    # The adapter itself is sanitizer-free in any config (it compiles
+    # OrderBook.cpp directly rather than linking engine/debug_options), so this
+    # is not about sanitizers — it is about owning the generator and config.
+    # build/ is user-controlled: it has been both Ninja Multi-Config and plain
+    # Ninja/Debug, and against a single-config tree `--build --config Release`
+    # is SILENTLY IGNORED, yielding a Debug adapter at a different path. Perf
+    # numbers must not depend on how build/ happens to be configured today.
     cmake -S "${REPO_ROOT}" -B "${BUILD_DIR}" -G Ninja -DCMAKE_BUILD_TYPE=Release
     cmake --build "${BUILD_DIR}" --target flash1_adapter
     echo "Adapter: ${ADAPTER}"

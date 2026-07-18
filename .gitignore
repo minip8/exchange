@@ -2,5 +2,6 @@
 .cache/
 CMakeFiles/
 build/
+build-release/
 external/
 bench_results.json
