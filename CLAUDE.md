@@ -56,6 +56,10 @@ Scenarios: `static | normal | swing-25 | swing-40 | flash-crash`. Requires `libb
 
 `run_flash1.sh build` uses a dedicated single-config `build-release/` tree, deliberately *not* the shared `build/`. The adapter compiles `OrderBook.cpp` directly rather than linking `engine`, so it is sanitizer-free in any config — the separate tree is about owning the generator and config, not about sanitizers.
 
+### Benchmark pipeline (run + record + plot)
+
+`scripts/bench_pipeline.sh` runs the Google Benchmark suite (Release) plus one flash1 `perf` rep per scenario, writes a timestamped + git-SHA-tagged record JSON to gitignored `bench/results/`, and renders PNGs (latest snapshot + trend over history) to `bench/results/plots/`. Flags: `--full` (5 reps/scenario, median recorded — challenge-style scoring), `--skip-flash1`, `--plot-only`. Plotting needs `uv`; Python deps are declared inline in `scripts/plot_bench.py` (PEP 723). The flash1 baseline used for reference lines is hardcoded in `plot_bench.py` (`BASELINE_MPS`) — keep it in sync with the numbers below.
+
 **The score is the worst-case scenario, not the average.** Baseline (WSL2, July 2026): normal 1.91 M/s, static 1.12, swing-25 0.16, swing-40 0.092, flash-crash 0.059 — so 0.059 M/s. The collapse on volatile scenarios is attributed to the vector book's linear level scans plus never-erased empty `PriceLevel`s under the 95%-cancel workload.
 
 Formatting: `.clang-format` is `BasedOnStyle: Google` (2-space indent). Run `clang-format -i` on changed files.
