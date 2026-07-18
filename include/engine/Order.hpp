@@ -26,6 +26,14 @@ struct Order {
     ++instance_count;
   }
 
+  /*
+  Caller-supplied id: the caller owns id uniqueness. Does not touch
+  instance_count, so do not mix with the auto-id constructor in one book.
+  */
+  explicit Order(OrderId id_, OrderPrice price_, OrderTime time_,
+                 OrderQuantity quantity_, OrderSide side_) noexcept
+      : id(id_), price(price_), time(time_), quantity(quantity_), side(side_) {}
+
  public:
   OrderId id;
   OrderPrice price;
