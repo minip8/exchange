@@ -38,6 +38,26 @@ There is **no unit-test suite** — correctness is currently exercised only via 
 
 **Always benchmark the Release config.** `exchange_bench` sets `-O3 -march=native` on itself in every config, but it links `engine`, which propagates `debug_options` as a PUBLIC dependency — so the Debug bench binary is still built with ASan/UBSan/LSan and `_GLIBCXX_DEBUG`. Optimized *and* sanitized numbers are meaningless. Keep Debug for development so the sanitizers catch bugs.
 
+### flash1 benchmark harness
+
+The [flash1-dev/matching-engine-benchmark](https://github.com/flash1-dev/matching-engine-benchmark) harness is integrated as an external conformance + throughput benchmark. The adapter lives in `bench/flash1/adapter.cpp` and wraps `OrderBook` directly (harness-supplied ids pass through via the explicit-id `Order` constructor). The harness itself is cloned pinned into a gitignored `external/`.
+
+```bash
+scripts/fetch_harness.sh                 # one-time: clone + build the harness into external/
+scripts/run_flash1.sh build              # build adapter.so into build-release/
+scripts/run_flash1.sh audit  [scenario]  # correctness + book state audit
+scripts/run_flash1.sh perf   [scenario]  # timed run (also verifies the hash)
+scripts/run_flash1.sh challenge          # 10 perf + 1 audit per scenario, worst-case result
+```
+
+Also available: `conformance` (pre-flight check) and `explain <scenario>`, which dumps the canonical output and localizes the first divergence — the tool to reach for when a hash mismatches.
+
+Scenarios: `static | normal | swing-25 | swing-40 | flash-crash`. Requires `libboost-dev` (installed system-wide); the scripts hardcode no Boost paths.
+
+`run_flash1.sh build` uses a dedicated single-config `build-release/` tree, deliberately *not* the shared `build/`. The adapter compiles `OrderBook.cpp` directly rather than linking `engine`, so it is sanitizer-free in any config — the separate tree is about owning the generator and config, not about sanitizers.
+
+**The score is the worst-case scenario, not the average.** Baseline (WSL2, July 2026): normal 1.91 M/s, static 1.12, swing-25 0.16, swing-40 0.092, flash-crash 0.059 — so 0.059 M/s. The collapse on volatile scenarios is attributed to the vector book's linear level scans plus never-erased empty `PriceLevel`s under the 95%-cancel workload.
+
 Formatting: `.clang-format` is `BasedOnStyle: Google` (2-space indent). Run `clang-format -i` on changed files.
 
 ## Architecture
