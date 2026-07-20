@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <expected>
 #include <functional>
 #include <optional>
@@ -73,12 +74,21 @@ std::vector<Fill> OrderBook::match(std::vector<PriceLevel>& resting_levels,
                                    Order& aggressing_order,
                                    match_predicate_t match_predicate) {
   std::vector<Fill> fills{};
+  uint64_t fully_filled_count{};
   for (PriceLevel& level : resting_levels) {
-    if (level.orders.empty()) continue;
+    // if (level.orders.empty()) continue;
     auto level_fills{match(level.orders, aggressing_order, match_predicate)};
     if (level_fills.empty()) break;
     fills.insert(fills.end(), level_fills.begin(), level_fills.end());
+    fully_filled_count += static_cast<uint64_t>(level.orders.empty());
   }
+  /*
+  The `PriceLevel`s to be erased will always be the first `fully_filled_count` levels.
+  It is impossible to be otherwise, because we greedily fill levels from left to right.
+  */
+  resting_levels.erase(
+      resting_levels.begin(),
+      resting_levels.begin() + static_cast<long>(fully_filled_count));
   return fills;
 }
 std::vector<Fill> OrderBook::match(std::vector<Order>& resting_orders,
