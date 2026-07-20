@@ -98,7 +98,6 @@ std::vector<Fill> OrderBook::match(std::vector<Order>& resting_orders,
                                    Order& aggressing_order,
                                    match_predicate_t match_predicate) {
   std::vector<Fill> fills{};
-  OrderQuantity quantity_matched{0};
   long fully_filled_count{0};
 
   while (static_cast<size_t>(fully_filled_count) < resting_orders.size() &&
