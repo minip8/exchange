@@ -1,7 +1,6 @@
 #include "engine/OrderBook.hpp"
 
 #include <algorithm>
-#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -77,8 +76,6 @@ std::vector<Fill> OrderBook::match(std::vector<PriceLevel>& resting_levels,
   std::vector<Fill> fills{};
   uint64_t fully_filled_count{};
   for (PriceLevel& level : resting_levels) {
-    // if (level.orders.empty()) continue;
-    assert(!level.orders.empty());
     auto level_fills{match(level.orders, aggressing_order, match_predicate)};
     if (level_fills.empty()) break;
     fills.insert(fills.end(), level_fills.begin(), level_fills.end());
