@@ -1,6 +1,7 @@
 #include "engine/OrderBook.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -77,14 +78,16 @@ std::vector<Fill> OrderBook::match(std::vector<PriceLevel>& resting_levels,
   uint64_t fully_filled_count{};
   for (PriceLevel& level : resting_levels) {
     // if (level.orders.empty()) continue;
+    assert(!level.orders.empty());
     auto level_fills{match(level.orders, aggressing_order, match_predicate)};
     if (level_fills.empty()) break;
     fills.insert(fills.end(), level_fills.begin(), level_fills.end());
     fully_filled_count += static_cast<uint64_t>(level.orders.empty());
   }
   /*
-  The `PriceLevel`s to be erased will always be the first `fully_filled_count` levels.
-  It is impossible to be otherwise, because we greedily fill levels from left to right.
+  The `PriceLevel`s to be erased will always be the first `fully_filled_count`
+  levels. It is impossible to be otherwise, because we greedily fill levels from
+  left to right.
   */
   resting_levels.erase(
       resting_levels.begin(),
@@ -168,16 +171,21 @@ void OrderBook::tryInsertRestingOrder(Order&& order) {
 }
 std::expected<Order, EngineError> OrderBook::removeOrder(
     const OrderId& order_id) {
-  auto try_erase =
-      [&order_id,
-       this](std::vector<Order>& orders) -> std::expected<Order, EngineError> {
-    auto it{std::ranges::find(orders, order_id, &Order::id)};
-    if (it == orders.end()) {
+  auto try_erase = [&order_id, this](
+                       std::vector<PriceLevel>& levels,
+                       std::vector<PriceLevel>::iterator& level_it)
+      -> std::expected<Order, EngineError> {
+    auto& orders{level_it->orders};
+    auto order_it{std::ranges::find(orders, order_id, &Order::id)};
+    if (order_it == orders.end()) {
       return std::unexpected(EngineError::OrderNotFound);
     }
-    Order value{std::move(*it)};
-    orders.erase(it);
+    Order value{std::move(*order_it)};
     m_order_id_to_side_and_price.erase(order_id);
+    orders.erase(order_it);
+    if (level_it->orders.empty()) {
+      levels.erase(level_it);
+    }
     return value;
   };
 
@@ -189,11 +197,11 @@ std::expected<Order, EngineError> OrderBook::removeOrder(
   const auto& [order_side, order_price]{order_price_it->second};
 
   if (order_side == Types::OrderSide::Buy) {
-    auto& buy_orders{priceLevelIterator<OrderSide::Buy>(order_price)->orders};
-    return try_erase(buy_orders);
+    auto buy_levels_it{priceLevelIterator<OrderSide::Buy>(order_price)};
+    return try_erase(m_buy_levels, buy_levels_it);
   } else {
-    auto& sell_orders{priceLevelIterator<OrderSide::Sell>(order_price)->orders};
-    return try_erase(sell_orders);
+    auto sell_levels_it{priceLevelIterator<OrderSide::Sell>(order_price)};
+    return try_erase(m_sell_levels, sell_levels_it);
   }
 }
 bool OrderBook::contains(const OrderId& order_id) const noexcept {
