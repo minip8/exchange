@@ -12,6 +12,8 @@ Store `PriceLevel`s in sorted order in a `std::vector`.
 
 Each `PriceLevel` stores a `std::vector<Order>`, sorted by time.
 
+Delete `PriceLevel`s that are empty.
+
 ### 83bd5ae
 
 Replace `std::function_ref match_predicate` with inlined lambdas by templating `match` on `OrderSide`.
