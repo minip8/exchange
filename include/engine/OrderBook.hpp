@@ -42,7 +42,7 @@ class OrderBook {
 
   OrderBook() noexcept : m_id(instance_count) { ++instance_count; }
 
-  std::vector<Fill> addOrder(Order&&) noexcept;
+  std::vector<Fill> addOrder(Order&&);
   std::expected<Order, EngineError> removeOrder(const OrderId&);
   std::expected<std::vector<Fill>, EngineError> modifyOrder(const OrderId&);
   bool contains(const OrderId&) const noexcept;
