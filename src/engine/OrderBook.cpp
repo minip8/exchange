@@ -56,9 +56,9 @@ std::vector<Fill> OrderBook::addOrder(Order&& aggressing_order) {
   std::vector<Fill> fills{[&] {
     switch (aggressing_order.side) {
       case Types::OrderSide::Buy:
-        return match<Types::OrderSide::Buy>(m_sell_levels, aggressing_order);
+        return match<Types::OrderSide::Buy>(aggressing_order);
       case Types::OrderSide::Sell:
-        return match<Types::OrderSide::Sell>(m_buy_levels, aggressing_order);
+        return match<Types::OrderSide::Sell>(aggressing_order);
       default:
         std::unreachable();
     }

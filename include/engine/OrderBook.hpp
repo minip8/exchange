@@ -52,8 +52,7 @@ class OrderBook {
 
  private:
   template <OrderSide>
-  std::vector<Fill> match(std::vector<PriceLevel>& resting_levels,
-                          Order& aggressing_order);
+  std::vector<Fill> match(Order& aggressing_order);
 
   template <OrderSide>
   std::vector<Fill> match(std::vector<Order>& resting_orders,
@@ -109,8 +108,14 @@ auto OrderBook::priceLevelIteratorImpl(this Self& self,
   }
 }
 template <OrderSide side>
-std::vector<Fill> OrderBook::match(std::vector<PriceLevel>& resting_levels,
-                                   Order& aggressing_order) {
+std::vector<Fill> OrderBook::match(Order& aggressing_order) {
+  std::vector<PriceLevel>& resting_levels{[this] -> std::vector<PriceLevel>& {
+    if constexpr (side == Types::OrderSide::Buy) {
+      return m_sell_levels;
+    } else {
+      return m_buy_levels;
+    }
+  }()};
   std::vector<Fill> fills{};
   uint64_t fully_filled_count{};
   for (PriceLevel& level : resting_levels) {
