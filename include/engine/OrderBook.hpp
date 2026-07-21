@@ -23,11 +23,11 @@ class OrderBook {
   using match_predicate_t = std::function_ref<bool(
       const Order& aggressing_order, const Order& resting_order)>;
 
-  match_predicate_t m_match_buy_aggressor{
+  static inline auto m_match_buy_aggressor{
       [](const Order& aggressing_order, const Order& resting_order) {
         return aggressing_order.price >= resting_order.price;
       }};
-  match_predicate_t m_match_sell_aggressor{
+  static inline auto m_match_sell_aggressor{
       [](const Order& aggressing_order, const Order& resting_order) {
         return aggressing_order.price <= resting_order.price;
       }};
@@ -51,16 +51,17 @@ class OrderBook {
   OrderBookId id() const noexcept { return m_id; }
 
  private:
+  template <OrderSide>
   std::vector<Fill> match(std::vector<PriceLevel>& resting_levels,
-                          Order& aggressing_order,
-                          match_predicate_t match_predicate);
+                          Order& aggressing_order);
 
+  template <OrderSide>
   std::vector<Fill> match(std::vector<Order>& resting_orders,
-                          Order& aggressing_order,
-                          match_predicate_t match_predicate);
+                          Order& aggressing_order);
 
-  std::optional<Fill> match(Order& aggressing_order, Order& resting_order,
-                            match_predicate_t match_predicate) const;
+  template <OrderSide>
+  std::optional<Fill> match(Order& aggressing_order,
+                            Order& resting_order) const;
 
   void tryInsertRestingOrder(Order&&);
 
@@ -106,5 +107,87 @@ auto OrderBook::priceLevelIteratorImpl(this Self& self,
                                   return price_level.price >= order_price;
                                 });
   }
+}
+template <OrderSide side>
+std::vector<Fill> OrderBook::match(std::vector<PriceLevel>& resting_levels,
+                                   Order& aggressing_order) {
+  std::vector<Fill> fills{};
+  uint64_t fully_filled_count{};
+  for (PriceLevel& level : resting_levels) {
+    auto level_fills{match<side>(level.orders, aggressing_order)};
+    if (level_fills.empty()) break;
+    fills.insert(fills.end(), level_fills.begin(), level_fills.end());
+    fully_filled_count += static_cast<uint64_t>(level.orders.empty());
+  }
+  /*
+  The `PriceLevel`s to be erased will always be the first `fully_filled_count`
+  levels. It is impossible to be otherwise, because we greedily fill levels from
+  left to right.
+  */
+  resting_levels.erase(
+      resting_levels.begin(),
+      resting_levels.begin() + static_cast<long>(fully_filled_count));
+  return fills;
+}
+template <OrderSide side>
+std::vector<Fill> OrderBook::match(std::vector<Order>& resting_orders,
+                                   Order& aggressing_order) {
+  std::vector<Fill> fills{};
+  long fully_filled_count{0};
+
+  while (static_cast<size_t>(fully_filled_count) < resting_orders.size() &&
+         aggressing_order.quantity > OrderQuantity{0}) {
+    Order& resting_order =
+        resting_orders[static_cast<size_t>(fully_filled_count)];
+    std::optional<Fill> fill{match<side>(aggressing_order, resting_order)};
+    if (!fill.has_value()) break;
+    fills.push_back(std::move(fill).value());
+    fully_filled_count +=
+        static_cast<long>(resting_order.quantity == OrderQuantity{0});
+  }
+
+  // The fully-filled resting orders are no longer in the book, so drop them
+  // from the id index before erasing them from the level.
+  for (long i{0}; i < fully_filled_count; ++i) {
+    m_order_id_to_side_and_price.erase(
+        resting_orders[static_cast<size_t>(i)].id);
+  }
+
+  resting_orders.erase(resting_orders.begin(),
+                       resting_orders.begin() + fully_filled_count);
+
+  return fills;
+}
+/*
+Assumes positive order quantity.
+Mutates the orders to reflect their updated quantities.
+*/
+template <OrderSide side>
+std::optional<Fill> OrderBook::match(Order& aggressing_order,
+                                     Order& resting_order) const {
+  auto match_predicate{[this] {
+    if constexpr (side == Types::OrderSide::Buy) {
+      return m_match_buy_aggressor;
+    } else {
+      return m_match_sell_aggressor;
+    }
+  }()};
+  if (match_predicate(aggressing_order, resting_order)) {
+    OrderQuantity quantity_to_match{
+        std::min(aggressing_order.quantity, resting_order.quantity)};
+
+    aggressing_order.quantity -= quantity_to_match;
+    resting_order.quantity -= quantity_to_match;
+
+    return Fill{
+        .resting_order_id = resting_order.id,
+        .aggressor_order_id = aggressing_order.id,
+        .aggressor_side = aggressing_order.side,
+        .price = resting_order.price,
+        .time = aggressing_order.time,
+        .quantity = quantity_to_match,
+    };
+  }
+  return {};
 }
 }  // namespace Exchange::Engine
