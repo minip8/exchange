@@ -1,6 +1,7 @@
 #include <benchmark/benchmark.h>
 
 #include <random>
+#include <string>
 #include <vector>
 
 #include "engine/MatchingEngine.hpp"
@@ -11,6 +12,7 @@
 #include "types/OrderQuantity.hpp"
 #include "types/OrderSide.hpp"
 #include "types/OrderTime.hpp"
+#include "types/Symbol.hpp"
 
 using namespace Exchange::Engine;
 using namespace Exchange::Types;
@@ -26,16 +28,24 @@ OrderTime now() { return OrderTime{std::chrono::high_resolution_clock::now()}; }
 struct SeededEngine {
   MatchingEngine engine;
   std::vector<OrderBookId> book_ids;
+  std::vector<Symbol> symbols;
   std::vector<OrderId> resting_order_ids;
 };
+
+// Every book needs a distinct symbol: addOrderBook rejects a duplicate, so a
+// shared ticker would register only book 0 and leave every later lookup taking
+// the not-found path — the sweep would silently measure a failure path.
+Symbol symbolFor(std::size_t i) { return Symbol{std::to_string(i)}; }
 
 SeededEngine makeEngine(std::size_t n_books) {
   SeededEngine seeded;
   for (std::size_t i = 0; i < n_books; ++i) {
-    OrderBook book;
-    const auto book_id = book.id();
-    seeded.engine.addOrderBook(std::move(book));
+    const auto symbol = symbolFor(i);
+    // .value() so a registration failure is loud rather than silently
+    // benchmarking an empty engine.
+    const auto book_id = seeded.engine.addOrderBook(OrderBook{symbol}).value();
     seeded.book_ids.push_back(book_id);
+    seeded.symbols.push_back(symbol);
 
     Order resting{OrderPrice{10'000}, now(), OrderQuantity{100},
                   OrderSide::Buy};
@@ -91,6 +101,29 @@ static void BM_GetOrderBook_ByOrderId(benchmark::State& state) {
   state.SetComplexityN(static_cast<int64_t>(n_books));
 }
 BENCHMARK(BM_GetOrderBook_ByOrderId)
+    ->RangeMultiplier(8)
+    ->Range(1, 8192)
+    ->Complexity();
+
+// ---------------------------------------------------------------------
+// getOrderBook(Symbol) — the ticker-addressed entry point: Symbol ->
+// OrderBookId, then OrderBookId -> OrderBook. Same two-lookup shape as
+// the OrderId path, so comparing the two isolates the cost of hashing an
+// 8-byte inline symbol against hashing a uint64 id.
+// ---------------------------------------------------------------------
+static void BM_GetOrderBook_BySymbol(benchmark::State& state) {
+  const auto n_books = static_cast<std::size_t>(state.range(0));
+  auto seeded = makeEngine(n_books);
+  std::uniform_int_distribution<std::size_t> pick(0, n_books - 1);
+
+  for (auto _ : state) {
+    const auto& symbol = seeded.symbols[pick(rng())];
+    auto result = seeded.engine.getOrderBook(symbol);
+    benchmark::DoNotOptimize(result);
+  }
+  state.SetComplexityN(static_cast<int64_t>(n_books));
+}
+BENCHMARK(BM_GetOrderBook_BySymbol)
     ->RangeMultiplier(8)
     ->Range(1, 8192)
     ->Complexity();
@@ -158,10 +191,11 @@ static void BM_Engine_AddOrderBook(benchmark::State& state) {
   for (auto _ : state) {
     state.PauseTiming();
     auto seeded = makeEngine(n_existing);
-    OrderBook new_book;
+    // A symbol outside [0, n_existing) so the registration actually succeeds.
+    OrderBook new_book{symbolFor(n_existing)};
     state.ResumeTiming();
 
-    seeded.engine.addOrderBook(std::move(new_book));
+    (void)seeded.engine.addOrderBook(std::move(new_book));
   }
   state.SetComplexityN(static_cast<int64_t>(n_existing));
 }

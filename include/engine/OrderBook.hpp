@@ -2,6 +2,9 @@
 
 #include <expected>
 #include <optional>
+#include <ranges>
+#include <span>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -14,6 +17,7 @@
 #include "types/OrderId.hpp"
 #include "types/OrderPrice.hpp"
 #include "types/OrderSide.hpp"
+#include "types/Symbol.hpp"
 
 namespace Exchange::Engine {
 using namespace Exchange::Types;
@@ -29,14 +33,19 @@ class OrderBook {
       }};
 
  public:
-  //   OrderBook() noexcept = delete;
+  OrderBook() noexcept = delete;
   OrderBook(const OrderBook&) = delete;
   OrderBook& operator=(const OrderBook&) = delete;
   OrderBook(OrderBook&&) noexcept = default;
   OrderBook& operator=(OrderBook&&) noexcept = default;
   ~OrderBook() noexcept = default;
 
-  OrderBook() noexcept : m_id(instance_count) { ++instance_count; }
+  // Every book trades exactly one named instrument. The id remains
+  // process-wide monotonic and is not caller-supplied.
+  explicit OrderBook(Symbol symbol) noexcept
+      : m_id(instance_count), m_symbol(symbol) {
+    ++instance_count;
+  }
 
   std::vector<Fill> addOrder(Order&&);
   std::expected<Order, EngineError> removeOrder(const OrderId&);
@@ -45,6 +54,7 @@ class OrderBook {
   std::span<const PriceLevel> buys() const noexcept { return m_buy_levels; }
   std::span<const PriceLevel> sells() const noexcept { return m_sell_levels; }
   OrderBookId id() const noexcept { return m_id; }
+  const Symbol& symbol() const noexcept { return m_symbol; }
 
  private:
   template <OrderSide>
@@ -77,6 +87,7 @@ class OrderBook {
 
  private:
   OrderBookId m_id;
+  Symbol m_symbol;
   std::vector<PriceLevel> m_buy_levels{};
   std::vector<PriceLevel> m_sell_levels{};
   std::unordered_map<OrderId, std::pair<OrderSide, OrderPrice>>

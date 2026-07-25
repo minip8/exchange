@@ -9,6 +9,7 @@
 #include "engine/OrderBook.hpp"
 #include "types/EngineError.hpp"
 #include "types/OrderBookId.hpp"
+#include "types/Symbol.hpp"
 
 namespace Exchange::Engine {
 std::expected<std::reference_wrapper<const OrderBook>, EngineError>
@@ -29,6 +30,25 @@ MatchingEngine::getOrderBook(const OrderId& order_id) {
 std::expected<std::reference_wrapper<OrderBook>, EngineError>
 MatchingEngine::getOrderBook(const OrderBookId& order_book_id) {
   return getOrderBookImpl(*this, order_book_id);
+}
+
+std::expected<std::reference_wrapper<const OrderBook>, EngineError>
+MatchingEngine::getOrderBook(const Symbol& symbol) const {
+  return getOrderBookImpl(*this, symbol);
+}
+
+std::expected<std::reference_wrapper<OrderBook>, EngineError>
+MatchingEngine::getOrderBook(const Symbol& symbol) {
+  return getOrderBookImpl(*this, symbol);
+}
+
+std::expected<OrderBookId, EngineError> MatchingEngine::resolve(
+    const Symbol& symbol) const {
+  auto order_book_id_it{m_symbol_to_order_book_id.find(symbol)};
+  if (order_book_id_it == m_symbol_to_order_book_id.end()) {
+    return std::unexpected(EngineError::SymbolNotFound);
+  }
+  return order_book_id_it->second;
 }
 
 std::expected<std::vector<Fill>, EngineError> MatchingEngine::addOrder(
@@ -75,8 +95,19 @@ std::expected<std::vector<Fill>, EngineError> MatchingEngine::modifyOrder(
       });
 }
 
-void MatchingEngine::addOrderBook(OrderBook&& order_book) {
-  m_order_book_id_to_order_book.insert_or_assign(order_book.id(),
-                                                 std::move(order_book));
+std::expected<OrderBookId, EngineError> MatchingEngine::addOrderBook(
+    OrderBook&& order_book) {
+  // Read the identity out before the move, and check the symbol index first so
+  // the rejected path leaves `order_book` un-moved-from.
+  const Symbol symbol{order_book.symbol()};
+  const OrderBookId order_book_id{order_book.id()};
+  if (!m_symbol_to_order_book_id.try_emplace(symbol, order_book_id).second) {
+    return std::unexpected(EngineError::DuplicateSymbol);
+  }
+  // `try_emplace`, not `insert_or_assign`: neither index may silently replace a
+  // live book and orphan the order ids pointing at it.
+  m_order_book_id_to_order_book.try_emplace(order_book_id,
+                                            std::move(order_book));
+  return order_book_id;
 }
 }  // namespace Exchange::Engine

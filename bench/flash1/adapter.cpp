@@ -17,19 +17,19 @@
  * The book matches synchronously on the calling thread, so engine_flush()
  * is a no-op.
  */
-#include "matching_engine_api.h"
-
 #include <cstdint>
 #include <optional>
 #include <vector>
 
 #include "engine/Order.hpp"
 #include "engine/OrderBook.hpp"
+#include "matching_engine_api.h"
 #include "types/OrderId.hpp"
 #include "types/OrderPrice.hpp"
 #include "types/OrderQuantity.hpp"
 #include "types/OrderSide.hpp"
 #include "types/OrderTime.hpp"
+#include "types/Symbol.hpp"
 
 #define ADAPTER_EXPORT __attribute__((visibility("default")))
 
@@ -117,7 +117,9 @@ ADAPTER_EXPORT void engine_init(uint64_t /*seed*/,
                                 void* report_sink) {
   g_transport = transport;
   g_sink = report_sink;
-  g_book.emplace();
+  // The harness is single-instrument and symbol-agnostic; the ticker is only
+  // here because a book must name what it trades.
+  g_book.emplace(Types::Symbol{"FLASH1"});
 }
 
 ADAPTER_EXPORT void engine_shutdown(void) { g_book.reset(); }

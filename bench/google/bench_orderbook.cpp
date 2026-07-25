@@ -9,6 +9,7 @@
 #include "types/OrderQuantity.hpp"
 #include "types/OrderSide.hpp"
 #include "types/OrderTime.hpp"
+#include "types/Symbol.hpp"
 
 using namespace Exchange::Engine;
 using namespace Exchange::Types;
@@ -20,8 +21,9 @@ OrderTime now() { return OrderTime{std::chrono::high_resolution_clock::now()}; }
 // Builds a book with `depth` non-crossing price levels on each side,
 // centered around 10'000, so a benchmark can start from a realistic
 // (not empty) book state.
-OrderBook makeBookWithDepth(std::size_t depth) {
-  OrderBook book;
+OrderBook makeBookWithDepth(std::size_t depth,
+                            Symbol symbol = Symbol{"BENCH"}) {
+  OrderBook book{symbol};
   for (std::size_t i = 0; i < depth; ++i) {
     book.addOrder(Order{OrderPrice{10'000 - i}, now(), OrderQuantity{100},
                         OrderSide::Buy});
@@ -46,7 +48,7 @@ std::mt19937_64& rng() {
 static void BM_AddOrder_NoMatch_EmptyBook(benchmark::State& state) {
   for (auto _ : state) {
     state.PauseTiming();
-    OrderBook book;
+    OrderBook book{Symbol{"BENCH"}};
     state.ResumeTiming();
 
     auto fills = book.addOrder(
