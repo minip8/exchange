@@ -9,6 +9,7 @@
 #include "net/io/IoThread.hpp"
 #include "net/io/Listener.hpp"
 #include "net/io/PostingEventSink.hpp"
+#include "net/io/RingEgressSink.hpp"
 #include "net/io/ServerConfig.hpp"
 #include "net/io/TraderDirectory.hpp"
 
@@ -42,6 +43,13 @@ class Server {
   // config asked for 0. Used by the loopback tests.
   uint16_t binaryPort() const;
   uint16_t httpPort() const;
+  // Diagnostics: all zero unless the ring egress path is in use.
+  struct EgressStats {
+    uint64_t market_data_drops{};
+    uint64_t wakeups{};
+    uint64_t events_drained{};
+  };
+  EgressStats egressStats() const noexcept;
 
  private:
   void acceptBinary(tcp::socket socket);
@@ -55,7 +63,7 @@ class Server {
   ServerConfig m_config;
   TraderDirectory m_traders{};
   std::vector<std::unique_ptr<IoThread>> m_io_threads{};
-  std::unique_ptr<PostingEventSink> m_sink{};
+  std::unique_ptr<EventSink> m_sink{};
   std::unique_ptr<MatchingThread> m_matching{};
   std::shared_ptr<Listener> m_binary_listener{};
   std::shared_ptr<Listener> m_http_listener{};

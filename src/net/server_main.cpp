@@ -55,6 +55,9 @@ bool parseArgs(int argc, char** argv, ServerConfig& config) {
       }
     } else if (arg == "--spin-us") {
       if (!next(value) || !parseUint(value, config.spin_us)) return false;
+    } else if (arg == "--egress") {
+      if (!next(value)) return false;
+      config.egress = std::string{value};
     } else if (arg == "--traders") {
       if (!next(value)) return false;
       config.traders_path = std::string{value};
@@ -65,8 +68,8 @@ bool parseArgs(int argc, char** argv, ServerConfig& config) {
       logLine(
           "usage: exchange_server [--binary-port N] [--binary-bind ADDR]\n"
           "                       [--http-port N] [--io-threads N]\n"
-          "                       [--spin-us N] [--traders PATH]\n"
-          "                       [--web-root PATH]");
+          "                       [--spin-us N] [--egress ring|post]\n"
+          "                       [--traders PATH] [--web-root PATH]");
       std::exit(0);
     } else {
       logError("unknown argument: {}", arg);

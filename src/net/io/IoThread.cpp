@@ -8,6 +8,14 @@
 namespace Exchange::Net {
 void IoThread::start() {
   if (m_thread.joinable()) return;
+  // Arm the egress wake before the reactor runs, so an event published
+  // between here and the first socket read is not stranded in the ring.
+  m_egress.start([this](std::span<const Event> events) { dispatch(events); },
+                 [this](uint32_t session_id) {
+                   if (auto session{m_sessions.find(session_id)}) {
+                     session->close("egress overflow on a private stream");
+                   }
+                 });
   m_thread = std::thread{[this] {
     try {
       m_context.run();
@@ -18,6 +26,7 @@ void IoThread::start() {
 }
 
 void IoThread::stop() {
+  m_egress.stop();
   m_guard.reset();
   m_context.stop();
 }

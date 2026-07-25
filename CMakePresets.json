@@ -79,6 +79,12 @@
       "targets": ["exchange_cli"]
     },
     {
+      "name": "loopback-bench",
+      "configurePreset": "release",
+      "displayName": "Network latency benchmark",
+      "targets": ["net_loopback_bench"]
+    },
+    {
       "name": "smoke",
       "configurePreset": "debug",
       "displayName": "net_smoke (ASan/UBSan)",

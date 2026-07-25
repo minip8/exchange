@@ -28,7 +28,15 @@ bool Server::start(std::string& error) {
   // rings, an I/O thread needs its ring to exist, and the matching thread
   // needs a sink. So sink first (holding a reference to the still-empty
   // thread vector), then the matching thread, then the threads themselves.
-  m_sink = std::make_unique<PostingEventSink>(m_io_threads, threads);
+  if (m_config.egress == "post") {
+    m_sink = std::make_unique<PostingEventSink>(m_io_threads, threads);
+  } else if (m_config.egress == "ring") {
+    m_sink = std::make_unique<RingEgressSink>(m_io_threads, threads);
+  } else {
+    error =
+        "--egress must be \"ring\" or \"post\" (got '" + m_config.egress + "')";
+    return false;
+  }
   m_matching = std::make_unique<MatchingThread>(
       *m_sink, threads, MatchingLoopConfig{}, m_config.spin_us);
 
@@ -56,7 +64,8 @@ bool Server::start(std::string& error) {
           m_binary_listener->boundPort());
   logLine("http/ws {}:{} (serving {})", m_config.http_bind,
           m_http_listener->boundPort(), m_config.web_root);
-  logLine("io threads {}, spin {}us", threads, m_config.spin_us);
+  logLine("io threads {}, spin {}us, egress {}", threads, m_config.spin_us,
+          m_config.egress);
   return true;
 }
 
@@ -159,6 +168,20 @@ void Server::stop() {
 uint16_t Server::binaryPort() const {
   return m_binary_listener ? m_binary_listener->boundPort()
                            : m_config.binary_port;
+}
+
+Server::EgressStats Server::egressStats() const noexcept {
+  EgressStats stats{};
+  const auto* ring{dynamic_cast<const RingEgressSink*>(m_sink.get())};
+  if (ring == nullptr) return stats;
+  stats.market_data_drops = ring->marketDataDrops();
+  // events_drained / wakeups is the number this design exists to move: it is
+  // how many events one eventfd syscall carried.
+  for (const auto& thread : m_io_threads) {
+    stats.wakeups += thread->egress().wakeups();
+    stats.events_drained += thread->egress().eventsDrained();
+  }
+  return stats;
 }
 
 uint16_t Server::httpPort() const {

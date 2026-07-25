@@ -26,6 +26,17 @@ struct ServerConfig {
   */
   std::uint32_t spin_us{0};
 
+  /*
+  Which egress path to use: "ring" (per-thread SPSC + eventfd) or "post"
+  (asio::post per batch).
+
+  "post" is kept, not left behind, because it is the baseline the ring is
+  measured against — net_loopback_bench runs both and the difference is the
+  deliverable. It is also the fallback if the eventfd path ever misbehaves on
+  a platform.
+  */
+  std::string egress{"ring"};
+
   std::string traders_path{"config/traders.json"};
   std::string web_root{"web"};
 };

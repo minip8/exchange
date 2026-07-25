@@ -7,6 +7,7 @@
 #                                             run_challenge.py uses 10 — 5 is a
 #                                             faster personal-machine compromise)
 #   scripts/bench_pipeline.sh --skip-flash1   Google Benchmark suite only
+#   scripts/bench_pipeline.sh --net           also run the network latency bench
 #   scripts/bench_pipeline.sh --plot-only     re-render plots from existing records
 #
 # Output: one record JSON in bench/results/ (gitignored) + PNGs in
@@ -21,14 +22,16 @@ MODE=quick
 REPS=1
 SKIP_FLASH1=0
 PLOT_ONLY=0
+RUN_NET=0
 for arg in "$@"; do
   case "${arg}" in
     --full) MODE=full; REPS=5 ;;
     --skip-flash1) SKIP_FLASH1=1 ;;
+    --net) RUN_NET=1 ;;
     --plot-only) PLOT_ONLY=1 ;;
     *)
       echo "error: unknown flag '${arg}'" >&2
-      sed -n '2,13p' "${BASH_SOURCE[0]}" >&2
+      sed -n '2,14p' "${BASH_SOURCE[0]}" >&2
       exit 1
       ;;
   esac
@@ -80,6 +83,21 @@ else
       fi
     done
   done
+fi
+
+# --- network latency (opt-in: it takes ~30s and needs no harness) ---
+#
+# Not folded into the recorded JSON. Its output is a latency distribution
+# across three pipeline depths and two egress implementations, which does not
+# fit the single-number-per-scenario shape the plots are built around, and
+# flattening it to a median would throw away the only interesting part.
+if [[ "${RUN_NET}" -eq 1 ]]; then
+  echo "--- network latency ---"
+  (cd "${REPO_ROOT}" && cmake --build --preset loopback-bench)
+  # spin-us 200 keeps the matching thread hot, so the numbers measure the
+  # transport rather than the idle-wake policy.
+  (cd "${REPO_ROOT}" && ./build/release/bench/loopback/net_loopback_bench \
+      --spin-us 200)
 fi
 
 # --- persist record + render plots ---

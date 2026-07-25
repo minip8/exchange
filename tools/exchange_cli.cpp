@@ -750,6 +750,15 @@ int runLoad(const Options& options) {
     std::println(stderr, "FAIL: no messages were sent");
     return 1;
   }
+  // Guards against passing vacuously. Pointing --load at a book id that does
+  // not exist rejects every order, which otherwise looks like a clean run
+  // with impressive throughput.
+  const uint64_t rejected{stats.rejected.load()};
+  if (rejected > sent - sent / 10) {
+    std::println(stderr, "FAIL: {} of {} orders were rejected — wrong --book?",
+                 rejected, sent);
+    return 1;
+  }
   std::println("load: OK");
   return 0;
 }

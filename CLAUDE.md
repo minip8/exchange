@@ -4,13 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-A single-threaded, in-memory limit-order-book matching engine written in **C++26**. There is no networking, persistence, or user-facing protocol — it is a pure in-process library (`libengine.a`) plus a smoke-test `app` executable and Google Benchmark suites.
+A limit-order-book matching engine written in **C++26**, plus a networked front end around it.
+
+The engine itself (`libengine.a`) is unchanged in character: single-threaded, in-memory, no persistence, and it remains the thing the flash1 conformance harness measures. Everything the network needs — order state, `leaves`, the book directory, ownership, L2 aggregates — is **gateway-owned**, which is what keeps the benchmarked core pure.
+
+The networking layer (`src/net/`, `include/net/`) is I/O threads feeding one matching thread through lock-free SPSC rings, with two protocols over one core: a custom binary TCP protocol for algo clients and WebSocket/JSON for a browser GUI. See the "Networking" section below.
 
 ## Build & Run
 
 The build uses **CMake + Ninja** with **g++**, driven entirely through `CMakePresets.json`. C++26 with `-fexperimental-library`-level features (`std::expected`, `std::print`, `std::function_ref`, explicit object parameters / "deducing `this`").
 
-Two **single-config** trees, one per config, each pinned by a preset: `build/debug/` (the development default — ASan/UBSan/LSan + `_GLIBCXX_DEBUG`) and `build/release/` (optimized, sanitizer-free, the only config benchmarks may run in). Because the trees are single-config, artifacts land directly in the tree with **no per-config subdirectory**, and `--config` is never used — passing it to a single-config tree is silently ignored, which is exactly the failure this layout exists to prevent. Always address a tree by its preset, never by an ad-hoc `-B` path.
+Three **single-config** trees, one per config, each pinned by a preset: `build/debug/` (the development default — ASan/UBSan/LSan + `_GLIBCXX_DEBUG`), `build/tsan/` (ThreadSanitizer; see Networking) and `build/release/` (optimized, sanitizer-free, the only config benchmarks may run in). Which sanitizers the Debug config carries is selected by `EXCHANGE_SANITIZER` (`address` | `thread` | `none`). Because the trees are single-config, artifacts land directly in the tree with **no per-config subdirectory**, and `--config` is never used — passing it to a single-config tree is silently ignored, which is exactly the failure this layout exists to prevent. Always address a tree by its preset, never by an ad-hoc `-B` path.
 
 ```bash
 # Configure (once per tree; re-running is idempotent and cheap)
@@ -20,8 +24,12 @@ cmake --preset release
 # Build
 cmake --build --preset debug      # everything, Debug
 cmake --build --preset release    # everything, Release
+cmake --build --preset tsan       # everything, ThreadSanitizer
 cmake --build --preset bench      # just exchange_bench (Release)
 cmake --build --preset flash1     # just the flash1 adapter (Release)
+cmake --build --preset server     # just exchange_server (Release)
+cmake --build --preset smoke      # just net_smoke (Debug)
+cmake --build --preset loopback-bench   # network latency bench (Release)
 
 # Run the smoke-test executable
 ./build/debug/app
@@ -38,7 +46,7 @@ cmake --build --preset flash1     # just the flash1 adapter (Release)
 
 `cmake --preset` resolves `CMakePresets.json` from the **current working directory**, so scripts that may be invoked from anywhere must `cd` to the repo root first (both `scripts/run_flash1.sh` and `scripts/bench_pipeline.sh` do).
 
-There is **no unit-test suite** — correctness is currently exercised only via `src/main.cpp`, the benchmarks, and the flash1 conformance harness (the real gate; see below). `src/main.cpp` is a hand-rolled smoke test: it checks with a local `check()` helper rather than `assert`, because Release defines `NDEBUG` and would compile the assertions away. It prints each failure and exits non-zero, so it is usable as a CI step.
+There is **no unit-test suite** and none should be added — correctness is exercised via `src/main.cpp`, `src/net/smoke/net_smoke.cpp`, the benchmarks, and the flash1 conformance harness (the real gate for the engine; see below). `src/main.cpp` is a hand-rolled smoke test: it checks with a local `check()` helper rather than `assert`, because Release defines `NDEBUG` and would compile the assertions away. It prints each failure and exits non-zero, so it is usable as a CI step.
 
 `bench/CMakeLists.txt` is a pure dispatcher over two peer suites, each owning its own `CMakeLists.txt`: `bench/google/` (the Google Benchmark microbenchmarks — target `exchange_bench`, which also pins the googlebenchmark FetchContent dependency) and `bench/flash1/` (the external conformance harness adapter). Benchmark results and plots land in the gitignored `bench/results/`.
 
@@ -97,6 +105,100 @@ IDs are assigned by a **`static inline instance_count` counter** on `Order` and 
 
 ### Error handling
 Recoverable failures use `std::expected<T, EngineError>` (never exceptions). `EngineError` is `{ Success, OrderNotFound, OrderBookNotFound, SymbolNotFound, DuplicateSymbol, SymbolTooLong }`. Propagate with `std::unexpected(...)` and chain with `and_then`, matching the existing style.
+
+## Networking (`include/net/`, `src/net/`)
+
+### Build
+
+`EXCHANGE_BUILD_NET` (ON by default) adds `src/net`. **Boost must be found in CONFIG mode** — CMake 4.4 removed `FindBoost.cmake`, so module mode hard-fails. The layer is header-only Boost (Asio + Beast + JSON) with `BOOST_{ASIO,BEAST}_SEPARATE_COMPILATION`; exactly one TU (`src/net/boost_impl.cpp`) carries the implementation, and adding anything to it costs a recompile of all of Asio.
+
+| Target | Kind | Notes |
+|---|---|---|
+| `net_protocol` | INTERFACE | header-only core + wire |
+| `net_boost` | INTERFACE | `Boost::headers`, Threads, separate-compilation defines |
+| `net_gateway` | STATIC | `engine` + `net_protocol` + Threads. **Deliberately no Boost** — the matching-thread logic must stay exercisable with no sockets. The binary codec lives here for the same reason. |
+| `net_io` | STATIC | sockets, sessions, listeners, the JSON codec, `boost_impl.cpp` |
+| `exchange_server`, `exchange_cli`, `net_smoke`, `net_loopback_bench` | EXE | |
+
+Nothing is SHARED, so the non-PIC `engine` never becomes a problem. `net_io` links `engine` **normally** and inherits its sanitizers — do NOT copy the flash1 adapter's compile-`OrderBook.cpp`-directly trick here, which would mismatch `std::vector<Fill>` layouts across the `_GLIBCXX_DEBUG` boundary.
+
+Three build trees: `debug` (ASan/UBSan/LSan), `tsan` (ThreadSanitizer — the only thing that can validate the rings' memory ordering, and it cannot coexist with ASan), `release`.
+
+### Threading
+
+**Thread-per-`io_context`**, not one context with N threads. A socket is only ever touched by its own thread, so there are **no strands anywhere** and per-session state (write buffers, frame parser, in-flight counter) is plain non-atomic. Accepting happens on thread 0; sockets are handed off with `release()` + re-adopt on the target context — *moving the socket object alone silently misbehaves*, because it keeps its association with the original reactor.
+
+`session_id = (io_thread_index << 24) | local_counter`. The high byte routes egress in O(1); the per-thread counter needs no atomic. 0 is never handed out — it is the "no session" sentinel.
+
+Ingress: one `SpscRing<Command>` per I/O thread, round-robined by the matching thread with a per-ring batch cap. Chosen over an MPSC queue because per-session FIFO is the only ordering that matters and a pinned session gets it by construction; see the comment on `MatchingThread`.
+
+### The one-minter rule
+
+`Order::instance_count` and `OrderBook::instance_count` are non-atomic `static inline` counters. **`MatchingLoop` mints every order id itself and uses `Order`'s explicit-id constructor exclusively**, so that counter is never written in this process. `OrderBook` construction *does* bump its counter, which is why book creation must happen inside the `CreateBook` handler on the matching thread (a debug assert enforces the thread).
+
+`OrderTime` is **priority, not a clock**: it comes from the loop's monotonic `m_seq`, which satisfies the book's non-decreasing invariant for free. Wall-clock for reports comes from `Command::recv_ts_ns`, stamped on the I/O thread. Never conflate them. Together these make a scripted `vector<Command>` produce a bit-identical `vector<Event>` every run.
+
+### Wire
+
+`Command` and `Event` are each **exactly 64 bytes**, trivially copyable, **no pointers ever**, `static_assert`ed. Because `Event` is fixed-size, a snapshot is not one event — it is `SnapshotBegin` + N×`LevelUpdate` + `SnapshotEnd` in one all-or-nothing `tryPushBatch`.
+
+`Types::OrderSide` is a scoped enum with no fixed underlying type, so it is `int`-sized and cannot appear in those structs. `net/core/Side.hpp` is the 1-byte wire side, converted at the engine boundary — deliberately, rather than changing an engine header and moving `Order`'s benchmarked layout.
+
+Binary protocol: 8-byte header, little-endian, fixed-size bodies ordered largest-first for zero padding, each `static_assert`ed. Decoded by **`memcpy`, never `reinterpret_cast`** (a frame boundary in a stream buffer has no alignment guarantee, and UBSan is on in Debug). Server→client types have the **high bit set**. `length` is validated against `[8, 1024]` before being trusted.
+
+`MessageNames.hpp` is the single `MsgType <-> string_view` table used by **both** codecs, and JSON field names are byte-identical to the binary struct fields. `net_smoke` encodes the same content through both and compares the resulting `Command`/`Event` bit-for-bit — that test is the anti-drift mechanism, not a nicety.
+
+**Prices are integers in both protocols.** The GUI divides by `10^price_scale`. No floats on the wire, ever.
+
+### Backpressure — four conditions, four answers
+
+| Condition | Policy |
+|---|---|
+| Ingress ring full | Suspend reads on **all** sessions of that thread (the ring is thread-wide) until it drains to a quarter free. TCP backpressure is the honest signal. |
+| Per-session credit exhausted (64 in flight) | Immediate `Throttled` reject on the I/O thread. The counter is a plain `uint32_t` — same thread both ways, because the session is pinned. |
+| Egress full, **private** stream | Disconnect. A dropped exec report silently desynchronizes the client's position and it cannot detect that. Resting orders survive. |
+| Egress full, **market data** | Drop it. Every message carries `md_seq`, so the client detects the gap and resnapshots — that path exists for exactly this. |
+| `SessionOpened`/`SessionClosed` | Must **never** be dropped. If the ring is full they go to `IoThread`'s critical queue, which outlives the session object. |
+
+Never block on a full ring from an I/O thread.
+
+### Market data
+
+L2 depth deltas (default 10 levels/side, a property of the **book**, not the subscriber — `md_seq` is per book, so every subscriber must get the same message stream) plus a trade tape. `quantity == 0` means the level is gone.
+
+Deltas are computed by diffing the **last published depth window** against the current one, not by looking up dirty prices. Same O(depth) cost, and it is the only formulation correct at the depth boundary: a deleted level makes the one at rank N visible, and a new best pushes one out of view, and neither is a "dirty price". See the long comment in `MarketDataPublisher.hpp`.
+
+Sequencing is free: `SubscribeMd` travels the same ordered path as everything else, so the matching thread handles it *between* two commands with the book quiescent. The ring's total order gives snapshot/delta consistency with no gap window and no race.
+
+### Ownership and sessions
+
+All ownership state is on the matching thread — non-negotiable, because the check must precede `removeOrder` and there is no way to un-cancel. `OrderStore` holds `OrderId -> OrderMeta{trader, session, coid, book, price, side, original, leaves}`; `leaves = original - Σ fill.quantity` makes the gateway the authoritative order-state store the engine lacks. Insert only if `leaves > 0`, erase at 0 — exactly mirroring when the engine indexes and drops.
+
+Ownership is by **trader**; routing is by **session**. Two clients on the same key see each other's fills. Cancel answers `UnknownOrder` from the store without touching the engine, which disambiguates `EngineError::OrderNotFound` and avoids a latent `end()` deref in `OrderBook::removeOrder`. `NotYourOrder` exists for the log only — `toWire` collapses it to `UnknownOrder` so the protocol is not an order-id enumeration oracle.
+
+**Amend mints a new order id.** `OrderBook::modifyOrder` takes no new price or quantity and is unusable as an amend, so it is remove + re-add stamped with the *current* seq. Priority is lost even when shrinking quantity, because `tryInsertRestingOrder` push_backs regardless of time. This is protocol-visible and documented.
+
+### Gotchas
+
+- **`json::value` must not be brace-initialized.** `json::value v{json::parse(...)}` selects the `initializer_list` constructor and yields a one-element *array* wrapping the document. The repo brace-initializes everywhere; this type is the exception.
+- **`std::println` is not concurrency-safe on this toolchain.** libstdc++'s `_File_sink` touches the `FILE` buffer outside the stdio lock. Use `net/io/Log.hpp` (`logLine`/`logError`) anywhere more than one thread can log.
+- **`log` collides with `<cmath>`'s** outside `namespace Exchange::Net`, hence `logLine`.
+
+### Verification
+
+```bash
+./build/debug/src/net/net_smoke   # rings, gateway scenarios, codecs, fuzz, loopback
+./build/tsan/src/net/net_smoke    # the same, under ThreadSanitizer
+scripts/net_e2e.sh                # binary protocol + market-data replay gate
+scripts/ws_e2e.py                 # two browser clients trade; ladders agree
+exchange_cli --load 8 --rate 50000 --book N --seconds 60   # multi-thread gate
+```
+
+`net_smoke` must pass under **both** the `debug` and `tsan` trees; that pair substitutes for a unit-test suite. `scripts/net_e2e.sh` is the market-data gate: `exchange_cli --tail --verify` rebuilds the book from a snapshot plus deltas and compares it against a fresh snapshot.
+
+`net_loopback_bench` (Release only, `cmake --build --preset loopback-bench`) reports p50/p99/p99.9 for the gateway alone and for a full TCP round trip, across three pipeline depths and both egress implementations. Measured result: the lock-free egress and `asio::post` are indistinguishable at depth 1, reach parity around depth 8, and the ring pulls ~8-10% ahead on median and throughput by depth 32 where one eventfd wake carries ~40 events. At this project's real load it buys nothing measurable — which is what the design predicted and what the benchmark exists to check rather than assume.
+
+**Phases 0-6 must not touch** `OrderBook.hpp`, `Order.hpp`, `PriceLevel.hpp` or `Symbol.hpp` — the flash1 harness compiles against them. Every engine change gets `scripts/run_flash1.sh audit` on all five scenarios before merge.
 
 ## Conventions
 

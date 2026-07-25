@@ -11,6 +11,7 @@
 #include "net/core/Command.hpp"
 #include "net/core/Event.hpp"
 #include "net/core/SpscRing.hpp"
+#include "net/io/EgressQueue.hpp"
 #include "net/io/SessionTable.hpp"
 #include "net/io/TraderDirectory.hpp"
 
@@ -43,6 +44,7 @@ class IoThread {
   SessionTable& sessions() noexcept { return m_sessions; }
   LogonAttemptLimiter& limiter() noexcept { return m_limiter; }
   IngressRing& ring() noexcept { return m_ring; }
+  EgressQueue& egress() noexcept { return m_egress; }
 
   // Session 0 is never handed out: 0 is the "no session" sentinel used
   // throughout the gateway.
@@ -96,6 +98,7 @@ class IoThread {
   uint32_t m_next_local{1};
   SessionTable m_sessions{};
   LogonAttemptLimiter m_limiter{};
+  EgressQueue m_egress{m_context};
   std::deque<Command> m_critical{};
   // Resume only once the ring is a quarter empty, not the instant one slot
   // frees: resuming at the first free slot would re-fill it immediately and

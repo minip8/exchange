@@ -67,10 +67,12 @@ target_link_libraries(net_gateway PUBLIC engine net_protocol Threads::Threads)
 # ---------------------------------------------------------------------------
 add_library(net_io STATIC
     boost_impl.cpp
+    io/EgressQueue.cpp
     io/HttpSession.cpp
     io/IoThread.cpp
     io/Listener.cpp
     io/PostingEventSink.cpp
+    io/RingEgressSink.cpp
     io/Server.cpp
     io/TcpSession.cpp
     io/TraderDirectory.cpp
