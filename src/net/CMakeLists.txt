@@ -46,6 +46,11 @@ target_compile_definitions(net_boost INTERFACE
 # with no sockets and no threads, which is what makes net_smoke a real test.
 # ---------------------------------------------------------------------------
 add_library(net_gateway STATIC
+    gateway/BookDirectory.cpp
+    gateway/MarketDataPublisher.cpp
+    gateway/MatchingLoop.cpp
+    gateway/OrderStore.cpp
+    gateway/Positions.cpp
     gateway/RejectCode.cpp
 )
 target_link_libraries(net_gateway PUBLIC engine net_protocol)
@@ -66,5 +71,7 @@ target_link_libraries(exchange_server PRIVATE net_io)
 
 # net_smoke links net_gateway only — no Boost, no sockets — so gateway
 # scenarios run deterministically and the build stays fast.
+# Threads, but still no Boost: the ring's two-thread stress test needs
+# std::thread, and nothing else here does.
 add_executable(net_smoke smoke/net_smoke.cpp)
-target_link_libraries(net_smoke PRIVATE net_gateway)
+target_link_libraries(net_smoke PRIVATE net_gateway Threads::Threads)

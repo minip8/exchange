@@ -5,14 +5,21 @@
 
 namespace Exchange::Net {
 /*
-The false-sharing granule. `std::hardware_destructive_interference_size` is
-the standard spelling and is available here, but it is only a hint and some
-toolchains warn about ABI-sensitivity when it is used across a boundary — we
-only use it within this binary, so that is not a concern.
+The false-sharing granule.
+
+GCC warns (-Winterference-size) that this constant's value is not stable
+across compiler versions, and so must not appear in a type's layout that
+crosses a separately-compiled boundary. Everything that uses kCacheLine here
+lives in one binary built from one toolchain, so the hazard does not apply —
+and the warning is silenced in this one scope rather than switched off for
+the project, where it would be worth hearing.
 */
 #ifdef __cpp_lib_hardware_interference_size
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winterference-size"
 inline constexpr std::size_t kCacheLine{
     std::hardware_destructive_interference_size};
+#pragma GCC diagnostic pop
 #else
 inline constexpr std::size_t kCacheLine{64};
 #endif
