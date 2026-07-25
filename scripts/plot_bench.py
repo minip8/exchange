@@ -30,6 +30,10 @@ SCHEMA_VERSION = 1
 SCENARIOS = ["static", "normal", "swing-25", "swing-40", "flash-crash"]
 
 # Baseline from CLAUDE.md (WSL2, July 2026) — update there first, then here.
+# Deliberately kept low: this is an early-history snapshot, not a current
+# measurement, so the +N% deltas printed against it routinely run into the
+# thousands of percent. That is expected and is not a sign of a broken run —
+# the correctness gate is the per-scenario VALID verdict, not the delta.
 BASELINE_MPS = {
     "static": 1.12,
     "normal": 1.91,

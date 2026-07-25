@@ -68,6 +68,8 @@ Scenarios: `static | normal | swing-25 | swing-40 | flash-crash`. Requires `libb
 
 **The score is the worst-case scenario, not the average.** Baseline (WSL2, July 2026): normal 1.91 M/s, static 1.12, swing-25 0.16, swing-40 0.092, flash-crash 0.059 — so 0.059 M/s. The collapse on volatile scenarios is attributed to the vector book's linear level scans.
 
+**These baseline numbers are known to be low, and are deliberately left as-is.** They are an early-history snapshot, not a current measurement — as of July 2026 flash-crash measures ~4.2 M/s, ~70× the figure above, and the volatile-scenario collapse described just above no longer reproduces. So **beating the baseline by one or two orders of magnitude is expected, not a red flag** — in particular it does not mean a change has broken the harness into a fast failure path. Check that the usual way (`run_flash1.sh audit <scenario>` → `Status: PASS` with a matching hash, `Verdict: VALID`); that is the real correctness gate. To attribute a throughput change, compare against a build of the parent commit, not against these figures. Treat `BASELINE_MPS` in `plot_bench.py` the same way: a floor marker, not a target.
+
 Formatting: `.clang-format` is `BasedOnStyle: Google` (2-space indent). Run `clang-format -i` on changed files.
 
 ## Architecture
