@@ -25,16 +25,18 @@ cmake --build build --config Release
 
 # Build & run benchmarks
 cmake --build build --config Release --target exchange_bench
-./build/bench/Release/exchange_bench
+./build/bench/google/Release/exchange_bench
 
 # Run a single benchmark by name (regex)
-./build/bench/Release/exchange_bench --benchmark_filter='BM_AddOrder.*'
+./build/bench/google/Release/exchange_bench --benchmark_filter='BM_AddOrder.*'
 
-# JSON output for regression gating (see bench/CMakeLists.txt for the intended CI flow)
-./build/bench/Release/exchange_bench --benchmark_format=json > bench_results.json
+# JSON output for regression gating (see bench/google/CMakeLists.txt for the intended CI flow)
+./build/bench/google/Release/exchange_bench --benchmark_format=json > bench_results.json
 ```
 
 There is **no unit-test suite** — correctness is currently exercised only via `src/main.cpp` and the benchmarks.
+
+`bench/CMakeLists.txt` is a pure dispatcher over two peer suites, each owning its own `CMakeLists.txt`: `bench/google/` (the Google Benchmark microbenchmarks — target `exchange_bench`, which also pins the googlebenchmark FetchContent dependency) and `bench/flash1/` (the external conformance harness adapter). Benchmark results and plots land in the gitignored `bench/results/`.
 
 **Always benchmark the Release config.** `exchange_bench` sets `-O3 -march=native` on itself in every config, but it links `engine`, which propagates `debug_options` as a PUBLIC dependency — so the Debug bench binary is still built with ASan/UBSan/LSan and `_GLIBCXX_DEBUG`. Optimized *and* sanitized numbers are meaningless. Keep Debug for development so the sanitizers catch bugs.
 

@@ -55,7 +55,7 @@ fi
 cmake --build "${REPO_ROOT}/build" --config Release --target exchange_bench
 GB_JSON="$(mktemp /tmp/exchange_gb.XXXXXX.json)"
 trap 'rm -f "${GB_JSON}"' EXIT
-"${REPO_ROOT}/build/bench/Release/exchange_bench" \
+"${REPO_ROOT}/build/bench/google/Release/exchange_bench" \
   --benchmark_format=console --benchmark_out_format=json --benchmark_out="${GB_JSON}"
 
 # --- flash1 harness (perf mode; audit measures correctness, not throughput) ---
