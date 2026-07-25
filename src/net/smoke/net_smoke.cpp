@@ -38,6 +38,7 @@ and for this class of bug it is stronger than most suites would be:
 #include "net/gateway/MatchingLoop.hpp"
 #include "net/io/Server.hpp"
 #include "net/wire/BinaryProtocol.hpp"
+#include "net/wire/JsonProtocol.hpp"
 #include "net/wire/MessageNames.hpp"
 #include "types/Symbol.hpp"
 
@@ -1317,6 +1318,203 @@ void testLoopback() {
   server.stop();
 }
 
+/*
+The anti-drift mechanism.
+
+Two codecs over one core is only defensible if they cannot disagree. So for
+every message, the same content is encoded through both and the resulting
+Command (or Event) must compare bit-for-bit equal. A field added to one
+protocol and forgotten in the other fails here rather than in production, as
+a browser and an algo client silently seeing different prices.
+*/
+void testCodecEquivalence() {
+  auto sameCommand{[](const Command& lhs, const Command& rhs) {
+    return std::memcmp(&lhs, &rhs, sizeof(Command)) == 0;
+  }};
+
+  // --- new order ---
+  {
+    std::vector<std::byte> frame{};
+    Wire::encodeNewOrder(Wire::NewOrderBody{.client_order_id = 77,
+                                            .book_id = 3,
+                                            .price = 9900,
+                                            .quantity = 250,
+                                            .side = 1,
+                                            .tif = 1,
+                                            .flags = 1,
+                                            .pad = {}},
+                         1, frame);
+    const auto binary{Wire::decode(frame, kSessionA, kTraderA, 555)};
+    const auto json{Json::decode(
+        R"({"type":"new_order","client_order_id":77,"book_id":3,)"
+        R"("price":9900,"quantity":250,"side":1,"tif":1,"flags":1})",
+        kSessionA, kTraderA, 555)};
+    check(binary.status == Wire::DecodeStatus::Ok &&
+              json.status == Json::JsonStatus::Ok,
+          "a new order decodes in both protocols");
+    check(sameCommand(binary.command, json.command),
+          "both codecs produce an identical new-order Command");
+  }
+
+  // --- cancel ---
+  {
+    std::vector<std::byte> frame{};
+    Wire::encodeCancel(Wire::CancelBody{.client_order_id = 12, .order_id = 34},
+                       1, frame);
+    const auto binary{Wire::decode(frame, kSessionA, kTraderA, 1)};
+    const auto json{
+        Json::decode(R"({"type":"cancel","client_order_id":12,"order_id":34})",
+                     kSessionA, kTraderA, 1)};
+    check(sameCommand(binary.command, json.command),
+          "both codecs produce an identical cancel Command");
+  }
+
+  // --- amend ---
+  {
+    std::vector<std::byte> frame{};
+    Wire::encodeAmend(
+        Wire::AmendBody{
+            .client_order_id = 5, .order_id = 6, .price = 101, .quantity = 7},
+        1, frame);
+    const auto binary{Wire::decode(frame, kSessionA, kTraderA, 2)};
+    const auto json{
+        Json::decode(R"({"type":"amend","client_order_id":5,"order_id":6,)"
+                     R"("price":101,"quantity":7})",
+                     kSessionA, kTraderA, 2)};
+    check(sameCommand(binary.command, json.command),
+          "both codecs produce an identical amend Command");
+  }
+
+  // --- create book, where the symbol has two very different encodings ---
+  {
+    std::vector<std::byte> frame{};
+    Wire::encodeCreateBook(
+        Wire::CreateBookBody{.symbol = {'N', 'V', 'D', 'A', 0, 0, 0, 0},
+                             .price_scale = 3,
+                             .pad = {}},
+        1, frame);
+    const auto binary{Wire::decode(frame, kSessionA, kTraderA, 3)};
+    const auto json{Json::decode(
+        R"({"type":"create_book","symbol":"NVDA","price_scale":3})", kSessionA,
+        kTraderA, 3)};
+    check(sameCommand(binary.command, json.command),
+          "a fixed char[8] and a JSON string yield the same Symbol");
+  }
+
+  // --- subscribe ---
+  {
+    std::vector<std::byte> frame{};
+    Wire::encodeSubscribe(
+        MsgType::SubscribeMd,
+        Wire::SubscribeBody{.book_id = 2, .depth = 5, .pad = {}}, 1, frame);
+    const auto binary{Wire::decode(frame, kSessionA, kTraderA, 4)};
+    const auto json{
+        Json::decode(R"({"type":"subscribe_md","book_id":2,"depth":5})",
+                     kSessionA, kTraderA, 4)};
+    check(sameCommand(binary.command, json.command),
+          "both codecs produce an identical subscribe Command");
+  }
+
+  // --- every event type, through both codecs, compared after normalizing ---
+  auto sameEvent{[](const Event& original) {
+    std::vector<std::byte> frame{};
+    if (!Wire::encode(original, 1, frame)) return false;
+    Wire::Header header{};
+    if (!Wire::readHeader(frame, header)) return false;
+    const auto from_binary{Wire::decodeEvent(
+        header.type,
+        std::span<const std::byte>{frame}.subspan(Wire::kHeaderSize))};
+
+    const std::string text{Json::encode(original)};
+    if (text.empty()) return false;
+    const auto from_json{Json::decodeEvent(text)};
+
+    if (!from_binary.has_value() || !from_json.has_value()) return false;
+    Event lhs{*from_binary};
+    Event rhs{*from_json};
+    normalizeForCompare(lhs);
+    normalizeForCompare(rhs);
+    return std::memcmp(&lhs, &rhs, sizeof(Event)) == 0;
+  }};
+
+  auto event{[](EventType type) {
+    Event e{};
+    e.type = type;
+    e.session_id = 0x0100'0003;
+    e.trader_id = 5;
+    e.book_id = 2;
+    e.side = Side::Sell;
+    e.flags = EventFlags::kAggressor;
+    return e;
+  }};
+
+  Event ack{event(EventType::OrderAck)};
+  ack.payload.ack = AckPayload{.order_id = 11,
+                               .client_order_id = 12,
+                               .orig_order_id = 13,
+                               .price = 4000,
+                               .quantity = 60,
+                               .reject_code = RejectCode::None,
+                               .pad = {}};
+  check(sameEvent(ack), "OrderAck is identical in both protocols");
+
+  Event exec{event(EventType::ExecReport)};
+  exec.payload.exec = ExecPayload{.exec_id = 1,
+                                  .order_id = 2,
+                                  .client_order_id = 3,
+                                  .price = 4000,
+                                  .quantity = 5,
+                                  .leaves = 6};
+  check(sameEvent(exec), "ExecReport is identical in both protocols");
+
+  Event md{event(EventType::LevelUpdate)};
+  md.payload.md = MdPayload{.md_seq = 9,
+                            .price = 4000,
+                            .quantity = 0,  // the L2 delete convention
+                            .ts_ns = 12345,
+                            .aggregate = 0,
+                            .depth = 10,
+                            .level_side = Side::Sell,
+                            .pad = {}};
+  check(sameEvent(md), "LevelUpdate is identical in both protocols");
+
+  Event book{event(EventType::BookEntry)};
+  book.payload.book = BookPayload{.symbol = Symbol{"12345678"},
+                                  .book_id = 2,
+                                  .price_scale = 2,
+                                  .index = 0,
+                                  .count = 1,
+                                  .reject_code = RejectCode::None,
+                                  .pad = {}};
+  check(sameEvent(book),
+        "a full-width symbol survives both protocols identically");
+
+  Event position{event(EventType::PositionUpdate)};
+  position.payload.pos = PosPayload{.book_id = 2,
+                                    .net_quantity = -60,
+                                    .avg_cost = 4000,
+                                    .realized_pnl = -500,
+                                    .unrealized_pnl = 250,
+                                    .mark_price = 3950};
+  check(sameEvent(position), "signed P&L survives both protocols identically");
+
+  // Direction confusion must be caught in JSON exactly as the binary
+  // protocol's high-bit check catches it.
+  const auto backwards{Json::decode(R"({"type":"exec_report"})", 1, 1, 0)};
+  check(backwards.status == Json::JsonStatus::UnknownType,
+        "a client sending a server-to-client type is refused");
+
+  for (const std::string_view garbage :
+       {R"(not json at all)", R"({})", R"({"type":42})",
+        R"({"type":"nonsense"})", R"([1,2,3])",
+        R"({"type":"create_book",)"
+        R"("symbol":"WAYTOOLONG"})"}) {
+    const auto result{Json::decode(garbage, 1, 1, 0)};
+    check(result.status != Json::JsonStatus::Ok,
+          "malformed JSON never produces a Command");
+  }
+}
+
 void testRejectCodes() {
   using Exchange::Types::EngineError;
 
@@ -1351,6 +1549,7 @@ int main() {
 
   testBinaryCodecRoundTrip();
   testFrameParserFuzz();
+  testCodecEquivalence();
   testLoopback();
 
   if (g_failures == 0) {

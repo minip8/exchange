@@ -2,6 +2,7 @@
 
 #include <print>
 
+#include "net/io/HttpSession.hpp"
 #include "net/io/TcpSession.hpp"
 
 namespace Exchange::Net {
@@ -43,12 +44,19 @@ bool Server::start(std::string& error) {
       [this](tcp::socket socket) { acceptBinary(std::move(socket)); });
   if (!m_binary_listener->listen(error)) return false;
 
+  m_http_listener = std::make_shared<Listener>(
+      *m_io_threads[0], m_config.http_bind, m_config.http_port,
+      [this](tcp::socket socket) { acceptHttp(std::move(socket)); });
+  if (!m_http_listener->listen(error)) return false;
+
   m_matching->start();
   for (auto& thread : m_io_threads) thread->start();
 
   m_running = true;
   std::println("binary  {}:{} (loopback only)", m_config.binary_bind,
                m_binary_listener->boundPort());
+  std::println("http/ws {}:{} (serving {})", m_config.http_bind,
+               m_http_listener->boundPort(), m_config.web_root);
   std::println("io threads {}, spin {}us", threads, m_config.spin_us);
   return true;
 }
@@ -66,6 +74,20 @@ void Server::acceptBinary(tcp::socket socket) {
   session->start();
 }
 
+/*
+One listener serves both the GUI and its WebSocket. Whether a connection is a
+WebSocket is a property of its first request, not of the port, so the decision
+belongs in HttpSession rather than here.
+*/
+void Server::acceptHttp(tcp::socket socket) {
+  IoThread& owner{*m_io_threads[0]};
+  std::make_shared<HttpSession>(
+      std::move(socket),
+      SessionContext{.io = owner, .ring = owner.ring(), .traders = m_traders},
+      m_config.web_root)
+      ->start();
+}
+
 void Server::stop() {
   if (!m_running) return;
   m_running = false;
@@ -75,6 +97,7 @@ void Server::stop() {
   // drains whatever is still queued rather than dropping commands a client
   // was already told had been accepted.
   if (m_binary_listener) m_binary_listener->stop();
+  if (m_http_listener) m_http_listener->stop();
   for (auto& thread : m_io_threads) thread->stop();
   for (auto& thread : m_io_threads) thread->join();
   if (m_matching) m_matching->stop();
@@ -86,5 +109,9 @@ void Server::stop() {
 uint16_t Server::binaryPort() const {
   return m_binary_listener ? m_binary_listener->boundPort()
                            : m_config.binary_port;
+}
+
+uint16_t Server::httpPort() const {
+  return m_http_listener ? m_http_listener->boundPort() : m_config.http_port;
 }
 }  // namespace Exchange::Net

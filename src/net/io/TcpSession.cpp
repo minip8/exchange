@@ -27,8 +27,8 @@ TcpSession::TcpSession(tcp::socket socket, SessionContext context,
     : m_socket(std::move(socket)),
       m_context(context),
       m_session_id(session_id),
-      m_read_buffer(kReadBufferSize),
-      m_retry_timer(m_socket.get_executor()) {
+      m_read_buffer(kReadBufferSize) {
+  m_pump.emplace(m_context.ring, m_socket.get_executor(), [this] { doRead(); });
   boost::system::error_code ec{};
   const auto endpoint{m_socket.remote_endpoint(ec)};
   if (!ec && endpoint.address().is_v4()) {
@@ -42,7 +42,7 @@ TcpSession::TcpSession(tcp::socket socket, SessionContext context,
 void TcpSession::start() { doRead(); }
 
 void TcpSession::doRead() {
-  if (m_closing || m_flush_then_close || m_reads_suspended) return;
+  if (m_closing || m_flush_then_close || m_pump->readsSuspended()) return;
   if (m_read_size >= m_read_buffer.size()) {
     close("read buffer exhausted");
     return;
@@ -128,7 +128,7 @@ bool TcpSession::handleFrame(MsgType type, std::span<const std::byte> frame,
     return true;
   }
 
-  submit(command);
+  m_pump->submit(command);
   return true;
 }
 
@@ -140,70 +140,25 @@ bool TcpSession::authenticate(std::span<const std::byte> frame,
     return false;
   }
 
-  const uint64_t now{nowNs()};
-  if (!m_context.io.limiter().allowed(m_peer_ip, now)) {
-    sendReject(RejectCode::AuthFailed, 0, 0);
-    closeAfterFlush("too many failed logons");
-    return false;
-  }
-
   const std::size_t length{::strnlen(body.api_key, sizeof(body.api_key))};
-  const Trader* trader{
-      m_context.traders.authenticate(std::string_view{body.api_key, length})};
-  if (trader == nullptr) {
-    m_context.io.limiter().recordFailure(m_peer_ip, now);
-    sendReject(RejectCode::AuthFailed, 0, 0);
+  const AuthOutcome outcome{
+      authenticateSession(m_context.traders, m_context.io.limiter(), m_peer_ip,
+                          std::string_view{body.api_key, length}, nowNs())};
+  if (!outcome.ok) {
+    sendReject(outcome.code, 0, 0);
     closeAfterFlush("authentication failed");
     return false;
   }
-
-  m_context.io.limiter().recordSuccess(m_peer_ip);
-  m_trader_id = trader->id;
+  m_trader_id = outcome.trader_id;
 
   // Only the resolved identity crosses the ring; the key never does.
   Command opened{command};
   opened.trader_id = m_trader_id;
-  submit(opened);
+  m_pump->submit(opened);
 
   std::println("session {:#x} logged on as trader {} ({})", m_session_id,
-               trader->id, trader->name);
+               outcome.trader_id, outcome.name);
   return true;
-}
-
-void TcpSession::submit(const Command& command) {
-  if (command.type == CommandType::None) return;
-
-  // Order matters: anything already queued goes first, or this session's
-  // commands would reorder relative to each other. Per-session FIFO is the
-  // one ordering guarantee the design promises, and the reason a
-  // single-producer ring per I/O thread is sufficient.
-  if (m_pending.empty() && m_context.ring.tryPush(command)) return;
-
-  m_pending.push_back(command);
-  if (!m_reads_suspended) {
-    m_reads_suspended = true;
-    retryPending();
-  }
-}
-
-void TcpSession::retryPending() {
-  while (!m_pending.empty() && m_context.ring.tryPush(m_pending.front())) {
-    m_pending.pop_front();
-  }
-  if (m_pending.empty()) {
-    if (m_reads_suspended) {
-      m_reads_suspended = false;
-      doRead();
-    }
-    return;
-  }
-
-  auto self{shared_from_this()};
-  m_retry_timer.expires_after(kRetryInterval);
-  m_retry_timer.async_wait([this, self](const boost::system::error_code& ec) {
-    if (ec || m_closing) return;
-    retryPending();
-  });
 }
 
 void TcpSession::sendReject(RejectCode code, uint64_t client_order_id,
@@ -290,7 +245,7 @@ void TcpSession::close(std::string_view reason) {
   }
 
   boost::system::error_code ec{};
-  m_retry_timer.cancel();
+  m_pump->cancel();
   m_socket.shutdown(tcp::socket::shutdown_both, ec);
   m_socket.close(ec);
   m_context.io.sessions().remove(m_session_id);

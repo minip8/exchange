@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>exchange</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header>
+  <h1>exchange</h1>
+  <span id="instrument">—</span>
+  <span id="status" class="status down">disconnected</span>
+  <span class="spacer"></span>
+  <input id="key" type="password" placeholder="api key" autocomplete="off">
+  <button id="connect">connect</button>
+</header>
+
+<main>
+  <!-- ladder -->
+  <section id="pane-ladder">
+    <h2>book <select id="book"></select></h2>
+    <table class="ladder">
+      <thead><tr><th>bid</th><th>price</th><th>ask</th></tr></thead>
+      <tbody id="ladder"></tbody>
+    </table>
+    <p class="hint">click a price to prefill the ticket</p>
+  </section>
+
+  <!-- tape -->
+  <section id="pane-tape">
+    <h2>tape</h2>
+    <table>
+      <thead><tr><th>time</th><th>price</th><th>size</th></tr></thead>
+      <tbody id="tape"></tbody>
+    </table>
+  </section>
+
+  <!-- ticket + working orders -->
+  <section id="pane-orders">
+    <h2>ticket</h2>
+    <form id="ticket">
+      <label>side
+        <select id="side"><option value="0">buy</option><option value="1">sell</option></select>
+      </label>
+      <label>qty <input id="qty" type="number" min="1" value="100"></label>
+      <label>price <input id="price" type="number" step="any" placeholder="market"></label>
+      <label>tif
+        <select id="tif"><option value="0">GTC</option><option value="1">IOC</option></select>
+      </label>
+      <button type="submit">send</button>
+    </form>
+    <h2>working</h2>
+    <table>
+      <thead><tr><th>id</th><th>side</th><th>price</th><th>leaves</th><th></th></tr></thead>
+      <tbody id="working"></tbody>
+    </table>
+  </section>
+
+  <!-- fills + position -->
+  <section id="pane-account">
+    <h2>position</h2>
+    <table>
+      <thead><tr><th>book</th><th>net</th><th>avg</th><th>realized</th><th>unreal</th></tr></thead>
+      <tbody id="positions"></tbody>
+    </table>
+    <h2>fills</h2>
+    <table>
+      <thead><tr><th>time</th><th>side</th><th>price</th><th>qty</th></tr></thead>
+      <tbody id="fills"></tbody>
+    </table>
+  </section>
+</main>
+
+<!--
+  Rows are cloned from these rather than built with innerHTML: the values are
+  numbers from the server, but a symbol is a user-supplied string, and string
+  concatenation into innerHTML is how that becomes an injection.
+-->
+<template id="tpl-ladder-row">
+  <tr><td class="bid"><span class="bar"></span><span class="n"></span></td>
+      <td class="px"></td>
+      <td class="ask"><span class="bar"></span><span class="n"></span></td></tr>
+</template>
+<template id="tpl-tape-row">
+  <tr><td class="t"></td><td class="px"></td><td class="n"></td></tr>
+</template>
+<template id="tpl-working-row">
+  <tr><td class="id"></td><td class="side"></td><td class="px"></td>
+      <td class="n"></td><td><button class="cancel">cancel</button></td></tr>
+</template>
+<template id="tpl-position-row">
+  <tr><td class="sym"></td><td class="net"></td><td class="avg"></td>
+      <td class="realized"></td><td class="unreal"></td></tr>
+</template>
+<template id="tpl-fill-row">
+  <tr><td class="t"></td><td class="side"></td><td class="px"></td><td class="n"></td></tr>
+</template>
+
+<script src="/app.js"></script>
+</body>
+</html>

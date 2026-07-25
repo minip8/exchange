@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -15,7 +16,9 @@
 #include "net/core/Event.hpp"
 #include "net/core/RejectCode.hpp"
 #include "net/gateway/MatchingThread.hpp"
+#include "net/io/ClientSession.hpp"
 #include "net/io/IoThread.hpp"
+#include "net/io/SessionPump.hpp"
 #include "net/wire/MessageNames.hpp"
 
 namespace Exchange::Net {
@@ -38,18 +41,19 @@ per message and would dominate every latency number this project produces.
 Everything here runs on one thread (see IoThread), so nothing is atomic and
 nothing is a strand.
 */
-class TcpSession : public std::enable_shared_from_this<TcpSession> {
+class TcpSession : public ClientSession,
+                   public std::enable_shared_from_this<TcpSession> {
  public:
   TcpSession(tcp::socket socket, SessionContext context, uint32_t session_id);
 
   void start();
   // Called on this session's own I/O thread by IoThread::dispatch.
-  void deliver(std::span<const Event> events);
+  void deliver(std::span<const Event> events) override;
   // Tears the connection down now. Anything unwritten is lost, so error
   // paths that owe the client a reject should use closeAfterFlush.
-  void close(std::string_view reason);
+  void close(std::string_view reason) override;
 
-  uint32_t sessionId() const noexcept { return m_session_id; }
+  uint32_t sessionId() const noexcept override { return m_session_id; }
   uint32_t traderId() const noexcept { return m_trader_id; }
   bool loggedOn() const noexcept { return m_trader_id != 0; }
 
@@ -66,8 +70,6 @@ class TcpSession : public std::enable_shared_from_this<TcpSession> {
                    const Command& command, uint32_t seq);
   bool authenticate(std::span<const std::byte> frame, const Command& command);
 
-  void submit(const Command& command);
-  void retryPending();
   void sendReject(RejectCode code, uint64_t client_order_id, uint64_t order_id);
   void append(const Event& event);
 
@@ -88,18 +90,10 @@ class TcpSession : public std::enable_shared_from_this<TcpSession> {
   std::vector<std::byte> m_write_back{};
   bool m_writing{false};
 
-  /*
-  Commands that could not be pushed because the ingress ring was full.
-
-  Never block on a full ring from an I/O thread — that stalls every session
-  the thread owns. Instead this session's reads are suspended and a timer
-  retries, so TCP backpressure reaches the client, which is the honest
-  signal. Phase 5 widens the suspension to every session on the thread,
-  since the ring is a thread-wide resource.
-  */
-  std::deque<Command> m_pending{};
-  asio::steady_timer m_retry_timer;
-  bool m_reads_suspended{false};
+  // Never blocks on a full ring: it queues and suspends reads instead, so
+  // TCP backpressure reaches the client. Shared with WebSocketSession, since
+  // getting the ordering wrong there would be the same bug twice.
+  std::optional<SessionPump> m_pump{};
   bool m_closing{false};
   bool m_flush_then_close{false};
   std::string m_close_reason{};

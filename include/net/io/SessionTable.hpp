@@ -5,8 +5,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include "net/io/ClientSession.hpp"
+
 namespace Exchange::Net {
-class TcpSession;
 
 /*
 The sessions belonging to one I/O thread.
@@ -23,13 +24,13 @@ so `find` prunes as it goes.
 */
 class SessionTable {
  public:
-  void add(uint32_t session_id, const std::shared_ptr<TcpSession>& session) {
+  void add(uint32_t session_id, const std::shared_ptr<ClientSession>& session) {
     m_sessions.insert_or_assign(session_id, session);
   }
 
   void remove(uint32_t session_id) { m_sessions.erase(session_id); }
 
-  std::shared_ptr<TcpSession> find(uint32_t session_id) {
+  std::shared_ptr<ClientSession> find(uint32_t session_id) {
     const auto it{m_sessions.find(session_id)};
     if (it == m_sessions.end()) return nullptr;
     auto session{it->second.lock()};
@@ -39,8 +40,8 @@ class SessionTable {
 
   // Snapshots into a vector rather than exposing the map, so a callback may
   // safely close sessions (which mutates the table) while iterating.
-  std::vector<std::shared_ptr<TcpSession>> all() {
-    std::vector<std::shared_ptr<TcpSession>> live{};
+  std::vector<std::shared_ptr<ClientSession>> all() {
+    std::vector<std::shared_ptr<ClientSession>> live{};
     live.reserve(m_sessions.size());
     for (auto it{m_sessions.begin()}; it != m_sessions.end();) {
       auto session{it->second.lock()};
@@ -57,6 +58,6 @@ class SessionTable {
   std::size_t size() const noexcept { return m_sessions.size(); }
 
  private:
-  std::unordered_map<uint32_t, std::weak_ptr<TcpSession>> m_sessions{};
+  std::unordered_map<uint32_t, std::weak_ptr<ClientSession>> m_sessions{};
 };
 }  // namespace Exchange::Net

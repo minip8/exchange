@@ -40,9 +40,11 @@ class Server {
   // The port actually bound, which differs from the configured one when the
   // config asked for 0. Used by the loopback tests.
   uint16_t binaryPort() const;
+  uint16_t httpPort() const;
 
  private:
   void acceptBinary(tcp::socket socket);
+  void acceptHttp(tcp::socket socket);
 
   ServerConfig m_config;
   TraderDirectory m_traders{};
@@ -50,6 +52,7 @@ class Server {
   std::unique_ptr<PostingEventSink> m_sink{};
   std::unique_ptr<MatchingThread> m_matching{};
   std::shared_ptr<Listener> m_binary_listener{};
+  std::shared_ptr<Listener> m_http_listener{};
   bool m_running{false};
 };
 }  // namespace Exchange::Net
