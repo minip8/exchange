@@ -3,8 +3,8 @@
 #include <boost/asio/write.hpp>
 #include <chrono>
 #include <cstring>
-#include <print>
 
+#include "net/io/Log.hpp"
 #include "net/wire/BinaryProtocol.hpp"
 
 namespace Exchange::Net {
@@ -28,7 +28,7 @@ TcpSession::TcpSession(tcp::socket socket, SessionContext context,
       m_context(context),
       m_session_id(session_id),
       m_read_buffer(kReadBufferSize) {
-  m_pump.emplace(m_context.ring, m_socket.get_executor(), [this] { doRead(); });
+  m_pump.emplace(m_context.io, m_socket.get_executor(), [this] { doRead(); });
   boost::system::error_code ec{};
   const auto endpoint{m_socket.remote_endpoint(ec)};
   if (!ec && endpoint.address().is_v4()) {
@@ -41,8 +41,15 @@ TcpSession::TcpSession(tcp::socket socket, SessionContext context,
 
 void TcpSession::start() { doRead(); }
 
+void TcpSession::resumeReads() { doRead(); }
+
 void TcpSession::doRead() {
-  if (m_closing || m_flush_then_close || m_pump->readsSuspended()) return;
+  // Two independent reasons not to read: this session is tearing down, or
+  // the thread's ingress ring is under pressure. Asio has no "is a read
+  // already outstanding" query, so `m_reading` is what makes resumeReads()
+  // idempotent.
+  if (m_closing || m_flush_then_close || m_reading) return;
+  if (m_context.io.readsSuspended()) return;
   if (m_read_size >= m_read_buffer.size()) {
     close("read buffer exhausted");
     return;
@@ -52,12 +59,14 @@ void TcpSession::doRead() {
       asio::buffer(m_read_buffer.data() + m_read_size,
                    m_read_buffer.size() - m_read_size),
       [this, self](const boost::system::error_code& ec, std::size_t bytes) {
+        m_reading = false;
         if (ec) {
           close(ec == asio::error::eof ? "peer closed" : ec.message());
           return;
         }
         onRead(bytes);
       });
+  m_reading = true;
 }
 
 void TcpSession::onRead(std::size_t bytes) {
@@ -128,6 +137,14 @@ bool TcpSession::handleFrame(MsgType type, std::span<const std::byte> frame,
     return true;
   }
 
+  // Per-session credit. Rejecting immediately, on this thread, is the point:
+  // a client that outruns its own acks is told so without ever reaching the
+  // ring, so one runaway loop cannot crowd out its neighbours.
+  if (!m_pump->tryReserve()) {
+    sendReject(RejectCode::Throttled, command.client_order_id,
+               command.order_id);
+    return true;
+  }
   m_pump->submit(command);
   return true;
 }
@@ -154,10 +171,11 @@ bool TcpSession::authenticate(std::span<const std::byte> frame,
   // Only the resolved identity crosses the ring; the key never does.
   Command opened{command};
   opened.trader_id = m_trader_id;
+  static_cast<void>(m_pump->tryReserve());
   m_pump->submit(opened);
 
-  std::println("session {:#x} logged on as trader {} ({})", m_session_id,
-               outcome.trader_id, outcome.name);
+  logLine("session {:#x} logged on as trader {} ({})", m_session_id,
+          outcome.trader_id, outcome.name);
   return true;
 }
 
@@ -183,7 +201,14 @@ void TcpSession::append(const Event& event) {
 
 void TcpSession::deliver(std::span<const Event> events) {
   if (m_closing) return;
-  for (const Event& event : events) append(event);
+  for (const Event& event : events) {
+    append(event);
+    // Exactly one event per command carries this, so the count is exact
+    // rather than an estimate. See EventFlags::kCommandComplete.
+    if ((event.flags & EventFlags::kCommandComplete) != 0) {
+      m_pump->onCommandComplete();
+    }
+  }
   doWrite();
 }
 
@@ -250,6 +275,6 @@ void TcpSession::close(std::string_view reason) {
   m_socket.close(ec);
   m_context.io.sessions().remove(m_session_id);
 
-  std::println("session {:#x} closed: {}", m_session_id, reason);
+  logLine("session {:#x} closed: {}", m_session_id, reason);
 }
 }  // namespace Exchange::Net

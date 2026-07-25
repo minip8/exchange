@@ -28,6 +28,9 @@ class ClientSession {
   // Always called on this session's own I/O thread.
   virtual void deliver(std::span<const Event> events) = 0;
   virtual void close(std::string_view reason) = 0;
+  // Called by the I/O thread when ingress pressure clears. A session that
+  // is already reading must treat this as a no-op.
+  virtual void resumeReads() = 0;
   virtual uint32_t sessionId() const noexcept = 0;
 };
 }  // namespace Exchange::Net

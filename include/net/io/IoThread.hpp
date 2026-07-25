@@ -70,8 +70,21 @@ class IoThread {
   */
   void enqueueCritical(const Command& command);
 
+  /*
+  Ingress backpressure, applied to the whole thread.
+
+  The ingress ring belongs to the thread, not to a session, so one session
+  filling it starves its neighbours. Reads stop on every session here until
+  the ring has drained to a low-water mark, which turns the overload into TCP
+  backpressure — the one signal a client cannot ignore or misinterpret.
+  */
+  void onIngressFull();
+  bool readsSuspended() const noexcept { return m_reads_suspended; }
+  uint64_t suspensions() const noexcept { return m_suspensions; }
+
  private:
   void drainCritical();
+  void checkIngressPressure();
 
   std::size_t m_index;
   IngressRing& m_ring;
@@ -84,6 +97,13 @@ class IoThread {
   SessionTable m_sessions{};
   LogonAttemptLimiter m_limiter{};
   std::deque<Command> m_critical{};
+  // Resume only once the ring is a quarter empty, not the instant one slot
+  // frees: resuming at the first free slot would re-fill it immediately and
+  // spend the thread's time toggling reads on and off.
+  static constexpr std::size_t kResumeFreeSlots{kIngressRingCapacity / 4};
+  asio::steady_timer m_pressure_timer{m_context};
+  bool m_reads_suspended{false};
+  uint64_t m_suspensions{0};
   asio::steady_timer m_critical_timer{m_context};
   bool m_draining{false};
   std::thread m_thread{};

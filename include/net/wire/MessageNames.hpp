@@ -51,6 +51,7 @@ enum class MsgType : uint8_t {
   LevelUpdate = 0xB1,
   SnapshotEnd = 0xB2,
   TradePrint = 0xB3,
+  MdAck = 0xB4,
 
   PositionUpdate = 0xC0,
 };
@@ -99,11 +100,12 @@ inline constexpr std::array<MessageName, 22> kMessageNames{{
 
 // Market-data types are named separately only because they share one body
 // struct; keeping them in the table above would suggest four distinct shapes.
-inline constexpr std::array<MessageName, 4> kMarketDataNames{{
+inline constexpr std::array<MessageName, 5> kMarketDataNames{{
     {MsgType::SnapshotBegin, "snapshot_begin"},
     {MsgType::LevelUpdate, "level_update"},
     {MsgType::SnapshotEnd, "snapshot_end"},
     {MsgType::TradePrint, "trade_print"},
+    {MsgType::MdAck, "md_ack"},
 }};
 
 constexpr std::string_view nameOf(MsgType type) noexcept {

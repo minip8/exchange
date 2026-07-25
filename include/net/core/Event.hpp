@@ -35,6 +35,10 @@ enum class EventType : uint8_t {
   LevelUpdate,
   SnapshotEnd,
   TradePrint,
+  // Confirms a subscribe or unsubscribe took effect. It exists partly so
+  // that every client-originated command produces at least one event for its
+  // own session, which is what keeps the in-flight count from leaking.
+  MdAck,
 
   // Accounting
   PositionUpdate,
@@ -48,6 +52,17 @@ inline constexpr uint8_t kEndOfBatch{1u << 0};
 inline constexpr uint8_t kAggressor{1u << 1};
 // ExecReport/CancelAck: the order is now fully done and has left the book.
 inline constexpr uint8_t kFinal{1u << 2};
+/*
+The last event a command produced for the session that SENT it.
+
+This is what makes the per-session in-flight count exact rather than
+approximate. One command can produce many events, and some go to other
+sessions entirely — a fill reports to both counterparties, a level update to
+every subscriber — so "an event arrived" is not the same as "my command
+finished". The matching thread knows which command it is handling, so it
+marks the boundary rather than making the I/O thread infer it.
+*/
+inline constexpr uint8_t kCommandComplete{1u << 3};
 }  // namespace EventFlags
 
 // One leg of a fill, reported privately to one of the two owners.

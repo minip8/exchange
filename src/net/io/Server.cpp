@@ -1,8 +1,7 @@
 #include "net/io/Server.hpp"
 
-#include <print>
-
 #include "net/io/HttpSession.hpp"
+#include "net/io/Log.hpp"
 #include "net/io/TcpSession.hpp"
 
 namespace Exchange::Net {
@@ -14,8 +13,8 @@ bool Server::start(std::string& error) {
   if (m_running) return true;
 
   if (!m_traders.load(m_config.traders_path, error)) return false;
-  std::println("loaded {} trader credential(s) from {}", m_traders.size(),
-               m_config.traders_path);
+  logLine("loaded {} trader credential(s) from {}", m_traders.size(),
+          m_config.traders_path);
 
   const std::size_t threads{m_config.io_threads == 0 ? 1 : m_config.io_threads};
   // 256 is the hard ceiling: the I/O thread index is the high byte of a
@@ -53,25 +52,73 @@ bool Server::start(std::string& error) {
   for (auto& thread : m_io_threads) thread->start();
 
   m_running = true;
-  std::println("binary  {}:{} (loopback only)", m_config.binary_bind,
-               m_binary_listener->boundPort());
-  std::println("http/ws {}:{} (serving {})", m_config.http_bind,
-               m_http_listener->boundPort(), m_config.web_root);
-  std::println("io threads {}, spin {}us", threads, m_config.spin_us);
+  logLine("binary  {}:{} (loopback only)", m_config.binary_bind,
+          m_binary_listener->boundPort());
+  logLine("http/ws {}:{} (serving {})", m_config.http_bind,
+          m_http_listener->boundPort(), m_config.web_root);
+  logLine("io threads {}, spin {}us", threads, m_config.spin_us);
   return true;
 }
 
+std::size_t Server::nextIoThread() noexcept {
+  const std::size_t index{m_next_io_thread};
+  m_next_io_thread = (m_next_io_thread + 1) % m_io_threads.size();
+  return index;
+}
+
+/*
+Hands a freshly accepted socket to the thread that will own it.
+
+Accepting happens on thread 0, but a session must be pinned to one thread for
+its whole life — that pinning is what removes every strand and lets
+per-session counters be plain integers. So the descriptor is released from
+the accepting context and re-adopted on the target one.
+
+Moving the socket object alone is NOT sufficient and misbehaves silently: a
+moved-to socket keeps its association with the reactor that opened it, so
+completions would be delivered on the accepting thread while the session
+believed it owned them. release() + re-adopt is the only correct form.
+
+`release()` requires that no operation is outstanding, which is exactly true
+here — the socket has just been accepted and nothing has been started on it.
+*/
+void Server::handOff(tcp::socket socket, std::size_t target,
+                     std::function<void(tcp::socket, IoThread&)> make) {
+  IoThread& owner{*m_io_threads[target]};
+  if (target == 0) {
+    // Already on the accepting thread; no handoff, no post.
+    make(std::move(socket), owner);
+    return;
+  }
+
+  boost::system::error_code ec{};
+  const auto protocol{socket.local_endpoint(ec).protocol()};
+  if (ec) return;  // the peer vanished between accept and here
+  const auto descriptor{socket.release(ec)};
+  if (ec) return;
+
+  asio::post(owner.context(),
+             [&owner, descriptor, protocol, make = std::move(make)]() mutable {
+               boost::system::error_code adopt_ec{};
+               tcp::socket adopted{owner.context()};
+               adopted.assign(protocol, descriptor, adopt_ec);
+               if (adopt_ec) return;
+               make(std::move(adopted), owner);
+             });
+}
+
 void Server::acceptBinary(tcp::socket socket) {
-  // Phase 2 runs one I/O thread, so the accepting thread is also the owning
-  // thread and no handoff is needed. Phase 5 adds release()/adopt() here.
-  IoThread& owner{*m_io_threads[0]};
-  const uint32_t session_id{owner.nextSessionId()};
-  auto session{std::make_shared<TcpSession>(
-      std::move(socket),
-      SessionContext{.io = owner, .ring = owner.ring(), .traders = m_traders},
-      session_id)};
-  owner.sessions().add(session_id, session);
-  session->start();
+  handOff(std::move(socket), nextIoThread(),
+          [this](tcp::socket owned, IoThread& owner) {
+            const uint32_t session_id{owner.nextSessionId()};
+            auto session{std::make_shared<TcpSession>(
+                std::move(owned),
+                SessionContext{
+                    .io = owner, .ring = owner.ring(), .traders = m_traders},
+                session_id)};
+            owner.sessions().add(session_id, session);
+            session->start();
+          });
 }
 
 /*
@@ -80,12 +127,15 @@ WebSocket is a property of its first request, not of the port, so the decision
 belongs in HttpSession rather than here.
 */
 void Server::acceptHttp(tcp::socket socket) {
-  IoThread& owner{*m_io_threads[0]};
-  std::make_shared<HttpSession>(
-      std::move(socket),
-      SessionContext{.io = owner, .ring = owner.ring(), .traders = m_traders},
-      m_config.web_root)
-      ->start();
+  handOff(std::move(socket), nextIoThread(),
+          [this](tcp::socket owned, IoThread& owner) {
+            std::make_shared<HttpSession>(
+                std::move(owned),
+                SessionContext{
+                    .io = owner, .ring = owner.ring(), .traders = m_traders},
+                m_config.web_root)
+                ->start();
+          });
 }
 
 void Server::stop() {
@@ -102,8 +152,8 @@ void Server::stop() {
   for (auto& thread : m_io_threads) thread->join();
   if (m_matching) m_matching->stop();
 
-  std::println("handled {} command(s)",
-               m_matching ? m_matching->commandsHandled() : 0);
+  logLine("handled {} command(s)",
+          m_matching ? m_matching->commandsHandled() : 0);
 }
 
 uint16_t Server::binaryPort() const {

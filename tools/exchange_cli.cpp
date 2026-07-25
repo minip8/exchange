@@ -25,6 +25,7 @@ update. `--verify` additionally re-requests a snapshot at the end and
 compares — a real, automatable market-data correctness check.
 */
 #include <algorithm>
+#include <atomic>
 #include <boost/asio/connect.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -35,6 +36,7 @@ compares — a real, automatable market-data correctness check.
 #include <iostream>
 #include <map>
 #include <print>
+#include <random>
 #include <span>
 #include <sstream>
 #include <string>
@@ -61,6 +63,9 @@ struct Options {
   bool tail{false};
   bool verify{false};
   uint32_t tail_seconds{5};
+  uint32_t load_clients{0};
+  uint32_t load_rate{0};
+  uint64_t load_book{0};
 };
 
 bool parseUint(std::string_view text, auto& out) {
@@ -130,6 +135,10 @@ class Client {
  public:
   Client(asio::io_context& io, Options options)
       : m_socket(io), m_options(std::move(options)) {}
+
+  // Load mode counts instead of printing: a few hundred thousand lines of
+  // output would dominate the very thing being measured.
+  void setQuiet(bool quiet) noexcept { m_quiet = quiet; }
 
   bool connect(std::string& error) {
     boost::system::error_code ec{};
@@ -212,6 +221,14 @@ class Client {
     }
   }
 
+  struct Counters {
+    uint64_t acks{0};
+    uint64_t fills{0};
+    uint64_t throttled{0};
+    uint64_t rejects{0};
+  };
+  const Counters& counters() const noexcept { return m_counters; }
+
   bool closed() const noexcept { return m_closed; }
   const Ladder& ladder() const noexcept { return m_ladder; }
   bool sawGap() const noexcept { return m_saw_gap; }
@@ -228,6 +245,7 @@ class Client {
           m_closed = true;
           return;
         }
+        if (m_quiet) return;
         std::println("logged on: session {:#x}, trader {}, {} book(s)",
                      ack.session_id, ack.trader_id, ack.book_count);
         return;
@@ -235,6 +253,12 @@ class Client {
       case MsgType::Reject: {
         Wire::RejectBody reject{};
         if (!Wire::readBody(body, reject)) return;
+        ++m_counters.rejects;
+        if (static_cast<RejectCode>(reject.reject_code) ==
+            RejectCode::Throttled) {
+          ++m_counters.throttled;
+        }
+        if (m_quiet) return;
         std::println("REJECT coid={} order={} {}", reject.client_order_id,
                      reject.order_id, rejectName(reject.reject_code));
         return;
@@ -247,6 +271,16 @@ class Client {
       case MsgType::AmendAck: {
         Wire::AckBody ack{};
         if (!Wire::readBody(body, ack)) return;
+        ++m_counters.acks;
+        if (m_quiet) {
+          if (header.type == MsgType::OrderAck) {
+            if (ack.quantity > 0) m_working[ack.order_id] = ack;
+          } else {
+            m_working.erase(ack.order_id);
+            m_working.erase(ack.orig_order_id);
+          }
+          return;
+        }
         if (header.type == MsgType::OrderAck) {
           m_working[ack.order_id] = ack;
           // AckBody::quantity is `leaves`, not the original order size —
@@ -273,6 +307,9 @@ class Client {
       case MsgType::ExecReport: {
         Wire::ExecBody exec{};
         if (!Wire::readBody(body, exec)) return;
+        ++m_counters.fills;
+        if (exec.leaves == 0) m_working.erase(exec.order_id);
+        if (m_quiet) return;
         const bool aggressor{(exec.flags & EventFlags::kAggressor) != 0};
         std::println("FILL exec={} order={} {} {} @ {} leaves {} [{}]",
                      exec.exec_id, exec.order_id,
@@ -292,6 +329,7 @@ class Client {
         }
         const std::size_t length{
             static_cast<std::size_t>(::strnlen(book.symbol, 8))};
+        if (m_quiet) return;
         std::println("book {} = {} (scale {})", book.book_id,
                      std::string_view{book.symbol, length}, book.price_scale);
         return;
@@ -299,6 +337,7 @@ class Client {
       case MsgType::BookListEnd: {
         Wire::BookBody book{};
         if (!Wire::readBody(body, book)) return;
+        if (m_quiet) return;
         std::println("({} book(s))", book.count);
         return;
       }
@@ -309,6 +348,7 @@ class Client {
         m_in_snapshot = true;
         m_ladder.clear();
         m_md_seq = md.md_seq;
+        if (m_quiet) return;
         std::println("--- snapshot book {} seq {} ({} levels, depth {}) ---",
                      md.book_id, md.md_seq, md.aggregate, md.depth);
         return;
@@ -318,6 +358,7 @@ class Client {
         if (!Wire::readBody(body, md)) return;
         m_in_snapshot = false;
         m_md_seq = md.md_seq;
+        if (m_quiet) return;
         std::print("{}", m_ladder.render());
         return;
       }
@@ -326,13 +367,14 @@ class Client {
         if (!Wire::readBody(body, md)) return;
         if (!m_in_snapshot) checkSequence(md.md_seq);
         m_ladder.apply(md.side, md.price, md.quantity);
-        if (!m_in_snapshot) std::print("{}", m_ladder.render());
+        if (!m_in_snapshot && !m_quiet) std::print("{}", m_ladder.render());
         return;
       }
       case MsgType::TradePrint: {
         Wire::MdBody md{};
         if (!Wire::readBody(body, md)) return;
         checkSequence(md.md_seq);
+        if (m_quiet) return;
         std::println("TRADE {} @ {} ({})", md.quantity, md.price,
                      md.side == 0 ? "buy aggressor" : "sell aggressor");
         return;
@@ -341,6 +383,7 @@ class Client {
       case MsgType::PositionUpdate: {
         Wire::PositionBody pos{};
         if (!Wire::readBody(body, pos)) return;
+        if (m_quiet) return;
         std::println("POSITION book {} net {} avg {} realized {} unreal {}",
                      pos.book_id, pos.net_quantity, pos.avg_cost,
                      pos.realized_pnl, pos.unrealized_pnl);
@@ -348,6 +391,7 @@ class Client {
       }
 
       default:
+        if (m_quiet) return;
         std::println("unhandled {}", nameOf(header.type));
         return;
     }
@@ -357,8 +401,10 @@ class Client {
   // exactly one more than the last. A gap means resync with get_snapshot.
   void checkSequence(uint64_t md_seq) {
     if (m_md_seq != 0 && md_seq != m_md_seq + 1) {
-      std::println(stderr, "MD GAP: expected {} got {} — resnapshot needed",
-                   m_md_seq + 1, md_seq);
+      if (!m_quiet) {
+        std::println(stderr, "MD GAP: expected {} got {} — resnapshot needed",
+                     m_md_seq + 1, md_seq);
+      }
       m_saw_gap = true;
     }
     m_md_seq = md_seq;
@@ -371,6 +417,8 @@ class Client {
   std::size_t m_size{0};
   bool m_closed{false};
 
+  bool m_quiet{false};
+  Counters m_counters{};
   std::map<uint64_t, Wire::AckBody> m_working{};
   Ladder m_ladder{};
   uint64_t m_md_seq{0};
@@ -523,11 +571,19 @@ bool parseArgs(int argc, char** argv, Options& options) {
       if (!next(value) || !parseUint(value, options.tail_seconds)) return false;
     } else if (arg == "--verify") {
       options.verify = true;
+    } else if (arg == "--load") {
+      if (!next(value) || !parseUint(value, options.load_clients)) return false;
+    } else if (arg == "--rate") {
+      if (!next(value) || !parseUint(value, options.load_rate)) return false;
+    } else if (arg == "--book") {
+      if (!next(value) || !parseUint(value, options.load_book)) return false;
     } else if (arg == "--help" || arg == "-h") {
       std::println(
           "usage: exchange_cli --key KEY [--host H] [--port N]\n"
           "                    [--cancel-on-disconnect]\n"
-          "                    [--tail BOOK_ID [--seconds N] [--verify]]");
+          "                    [--tail BOOK_ID [--seconds N] [--verify]]\n"
+          "                    [--load N --rate MSGS_PER_SEC "
+          "[--book ID] [--seconds N]]");
       std::exit(0);
     } else {
       std::println(stderr, "unknown argument: {}", arg);
@@ -546,6 +602,158 @@ restated. Agreement means the delta stream is complete and correctly ordered
 — which is the actual claim being made about market data, and it is
 automatable, unlike eyeballing a ladder.
 */
+/*
+Load generator.
+
+`--load N --rate R` opens N connections, each in its own thread, and pushes
+an aggregate of R messages per second at the server for `--seconds`. Each
+client quotes both sides around a wandering mid and cancels as it goes, so
+the book actually churns rather than filling up with never-touched orders.
+
+This is the phase gate for multiple I/O threads. What it is looking for is
+not throughput — it is that nothing goes wrong: no sequence gaps in market
+data, no reordering within a session, no throttle storm, and (run against the
+tsan tree) no data race across the ring.
+*/
+struct LoadStats {
+  std::atomic<uint64_t> sent{0};
+  std::atomic<uint64_t> acked{0};
+  std::atomic<uint64_t> filled{0};
+  std::atomic<uint64_t> throttled{0};
+  std::atomic<uint64_t> rejected{0};
+  std::atomic<uint64_t> gaps{0};
+  std::atomic<uint64_t> errors{0};
+};
+
+void runLoadClient(const Options& options, uint32_t index, LoadStats& stats,
+                   std::atomic<bool>& stop) {
+  asio::io_context io{1};
+  Client client{io, options};
+  client.setQuiet(true);
+  std::string error{};
+  if (!client.connect(error)) {
+    stats.errors.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  client.socket().non_blocking(true);
+
+  // Subscribe so the market-data sequence check is exercised under load —
+  // the gap counter is the most interesting thing this test produces.
+  std::vector<std::byte> frame{};
+  Wire::encodeSubscribe(
+      MsgType::SubscribeMd,
+      Wire::SubscribeBody{.book_id = options.load_book, .depth = 10, .pad = {}},
+      client.nextSeq(), frame);
+  if (!client.write(frame, error)) return;
+
+  // Per-client share of the aggregate rate.
+  const uint32_t per_client{std::max<uint32_t>(
+      1, options.load_rate / std::max<uint32_t>(1, options.load_clients))};
+  const auto interval{std::chrono::nanoseconds{1'000'000'000ull / per_client}};
+
+  std::mt19937 rng{index * 2654435761u + 1u};
+  uint64_t coid{0};
+  uint64_t mid{5000};
+  auto next_send{std::chrono::steady_clock::now()};
+
+  while (!stop.load(std::memory_order_relaxed) && !client.closed()) {
+    const auto now{std::chrono::steady_clock::now()};
+    if (now < next_send) {
+      client.pump();
+      continue;
+    }
+    next_send = now + interval;
+
+    // Random walk the quote so the book keeps moving and levels are created
+    // and destroyed rather than just accumulating.
+    mid += static_cast<uint64_t>(rng() % 3) - 1;
+    if (mid < 100) mid = 100;
+    const bool buy{(rng() & 1u) != 0};
+
+    frame.clear();
+    Wire::encodeNewOrder(
+        Wire::NewOrderBody{
+            .client_order_id = ++coid,
+            .book_id = options.load_book,
+            .price = buy ? mid - 1 : mid + 1,
+            .quantity = 1 + (rng() % 20),
+            .side = static_cast<uint8_t>(buy ? 0 : 1),
+            .tif = static_cast<uint8_t>((rng() % 4) == 0 ? 1 : 0),
+            .flags = 0,
+            .pad = {}},
+        client.nextSeq(), frame);
+    if (!client.write(frame, error)) break;
+    stats.sent.fetch_add(1, std::memory_order_relaxed);
+
+    client.pump();
+  }
+
+  // Drain whatever is still in flight so the counters are not truncated.
+  const auto drain{std::chrono::steady_clock::now() +
+                   std::chrono::milliseconds{500}};
+  while (!client.closed() && std::chrono::steady_clock::now() < drain) {
+    client.pump();
+  }
+
+  stats.acked.fetch_add(client.counters().acks, std::memory_order_relaxed);
+  stats.filled.fetch_add(client.counters().fills, std::memory_order_relaxed);
+  stats.throttled.fetch_add(client.counters().throttled,
+                            std::memory_order_relaxed);
+  stats.rejected.fetch_add(client.counters().rejects,
+                           std::memory_order_relaxed);
+  if (client.sawGap()) stats.gaps.fetch_add(1, std::memory_order_relaxed);
+}
+
+int runLoad(const Options& options) {
+  LoadStats stats{};
+  std::atomic<bool> stop{false};
+  std::vector<std::thread> clients{};
+
+  const auto started{std::chrono::steady_clock::now()};
+  for (uint32_t i{0}; i < options.load_clients; ++i) {
+    clients.emplace_back([&, i] { runLoadClient(options, i, stats, stop); });
+  }
+
+  std::this_thread::sleep_for(std::chrono::seconds{options.tail_seconds});
+  stop.store(true, std::memory_order_relaxed);
+  for (std::thread& thread : clients) thread.join();
+
+  const auto elapsed{
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - started)
+          .count()};
+  const uint64_t sent{stats.sent.load()};
+  std::println("");
+  std::println("clients      {}", options.load_clients);
+  std::println("elapsed      {:.1f}s", elapsed);
+  std::println("sent         {} ({:.0f}/s)", sent,
+               static_cast<double>(sent) / elapsed);
+  std::println("acked        {}", stats.acked.load());
+  std::println("fills        {}", stats.filled.load());
+  std::println("throttled    {}", stats.throttled.load());
+  std::println("rejected     {}", stats.rejected.load());
+  std::println("md gaps      {}", stats.gaps.load());
+  std::println("conn errors  {}", stats.errors.load());
+
+  // A gap or a connection error is a failure. Throttling is not: it is the
+  // credit limit doing exactly its job, and at a high enough rate it is the
+  // expected outcome.
+  if (stats.gaps.load() != 0) {
+    std::println(stderr, "FAIL: market data gapped under load");
+    return 1;
+  }
+  if (stats.errors.load() != 0) {
+    std::println(stderr, "FAIL: {} client(s) failed to connect",
+                 stats.errors.load());
+    return 1;
+  }
+  if (sent == 0) {
+    std::println(stderr, "FAIL: no messages were sent");
+    return 1;
+  }
+  std::println("load: OK");
+  return 0;
+}
+
 int runTail(Client& client, const Options& options) {
   std::string error{};
   std::vector<std::byte> frame{};
@@ -614,6 +822,14 @@ int main(int argc, char** argv) {
   if (!client.connect(error)) {
     std::println(stderr, "{}", error);
     return 1;
+  }
+
+  if (options.load_clients > 0) {
+    // The connection opened above is only the argument check; the load mode
+    // opens its own, one per thread.
+    boost::system::error_code ec{};
+    client.socket().close(ec);
+    return runLoad(options);
   }
 
   if (options.tail) {

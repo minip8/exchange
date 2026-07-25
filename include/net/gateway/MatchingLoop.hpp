@@ -122,7 +122,9 @@ class MatchingLoop {
   // Private events every one of a trader's sessions should see (fills,
   // positions). Acks go only to the session that asked.
   void emitToTrader(uint32_t trader_id, const Event& prototype);
-  void flush();
+  // `origin_session` is the session that sent the command, or 0 for
+  // commands with nobody left to answer (SessionClosed).
+  void flush(uint32_t origin_session);
 
   // Applies one fill leg: two exec reports, a trade print, and both
   // counterparties' position updates.

@@ -1,7 +1,8 @@
 #include "net/io/Listener.hpp"
 
 #include <boost/asio/ip/address.hpp>
-#include <print>
+
+#include "net/io/Log.hpp"
 
 namespace Exchange::Net {
 Listener::Listener(IoThread& thread, const std::string& host, uint16_t port,
@@ -54,7 +55,7 @@ void Listener::doAccept() {
           // An accept failure is per-connection (fd exhaustion, a peer that
           // vanished mid-handshake); keep the listener armed.
           if (ec != asio::error::operation_aborted) {
-            std::println(stderr, "accept on {}: {}", m_port, ec.message());
+            logError("accept on {}: {}", m_port, ec.message());
             doAccept();
           }
           return;

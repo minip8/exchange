@@ -10,14 +10,16 @@ shutdown order.
 #include <charconv>
 #include <cstdlib>
 #include <exception>
-#include <print>
 #include <string>
 #include <string_view>
 
+#include "net/io/Log.hpp"
 #include "net/io/Server.hpp"
 #include "net/io/ServerConfig.hpp"
 
 namespace asio = boost::asio;
+using Exchange::Net::logError;
+using Exchange::Net::logLine;
 using Exchange::Net::Server;
 using Exchange::Net::ServerConfig;
 
@@ -60,14 +62,14 @@ bool parseArgs(int argc, char** argv, ServerConfig& config) {
       if (!next(value)) return false;
       config.web_root = std::string{value};
     } else if (arg == "--help" || arg == "-h") {
-      std::println(
+      logLine(
           "usage: exchange_server [--binary-port N] [--binary-bind ADDR]\n"
           "                       [--http-port N] [--io-threads N]\n"
           "                       [--spin-us N] [--traders PATH]\n"
           "                       [--web-root PATH]");
       std::exit(0);
     } else {
-      std::println(stderr, "unknown argument: {}", arg);
+      logError("unknown argument: {}", arg);
       return false;
     }
   }
@@ -83,7 +85,7 @@ int main(int argc, char** argv) {
     Server server{config};
     std::string error{};
     if (!server.start(error)) {
-      std::println(stderr, "fatal: {}", error);
+      logError("fatal: {}", error);
       return 1;
     }
 
@@ -95,13 +97,13 @@ int main(int argc, char** argv) {
     asio::io_context signals_context{1};
     asio::signal_set signals{signals_context, SIGINT, SIGTERM};
     signals.async_wait([&](const boost::system::error_code&, int signal) {
-      std::println("signal {} — shutting down", signal);
+      logLine("signal {} — shutting down", signal);
       server.stop();
       signals_context.stop();
     });
     signals_context.run();
   } catch (const std::exception& error) {
-    std::println(stderr, "fatal: {}", error.what());
+    logError("fatal: {}", error.what());
     return 1;
   }
   return 0;

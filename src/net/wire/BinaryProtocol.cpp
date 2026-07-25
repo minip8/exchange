@@ -330,6 +330,8 @@ std::optional<Event> decodeEvent(MsgType type,
       return readMd(EventType::SnapshotEnd);
     case MsgType::TradePrint:
       return readMd(EventType::TradePrint);
+    case MsgType::MdAck:
+      return readMd(EventType::MdAck);
 
     case MsgType::PositionUpdate: {
       PositionBody pos{};
@@ -466,6 +468,9 @@ bool encode(const Event& event, uint32_t seq, std::vector<std::byte>& out) {
       return true;
     case EventType::TradePrint:
       append(MsgType::TradePrint, seq, mdBody(MsgType::TradePrint), out);
+      return true;
+    case EventType::MdAck:
+      append(MsgType::MdAck, seq, mdBody(MsgType::MdAck), out);
       return true;
 
     case EventType::PositionUpdate: {

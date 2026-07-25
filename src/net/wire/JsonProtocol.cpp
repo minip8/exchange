@@ -251,12 +251,14 @@ std::string encode(const Event& event) {
     case EventType::SnapshotBegin:
     case EventType::LevelUpdate:
     case EventType::SnapshotEnd:
-    case EventType::TradePrint: {
+    case EventType::TradePrint:
+    case EventType::MdAck: {
       const MsgType type{
           event.type == EventType::SnapshotBegin ? MsgType::SnapshotBegin
           : event.type == EventType::LevelUpdate ? MsgType::LevelUpdate
           : event.type == EventType::SnapshotEnd ? MsgType::SnapshotEnd
-                                                 : MsgType::TradePrint};
+          : event.type == EventType::TradePrint  ? MsgType::TradePrint
+                                                 : MsgType::MdAck};
       json::object out{envelope(type)};
       out["md_seq"] = event.payload.md.md_seq;
       out["price"] = event.payload.md.price;
@@ -404,6 +406,9 @@ std::optional<Event> decodeEvent(std::string_view text) {
       break;
     case MsgType::TradePrint:
       md(EventType::TradePrint);
+      break;
+    case MsgType::MdAck:
+      md(EventType::MdAck);
       break;
 
     case MsgType::PositionUpdate:

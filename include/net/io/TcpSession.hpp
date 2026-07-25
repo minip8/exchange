@@ -52,6 +52,7 @@ class TcpSession : public ClientSession,
   // Tears the connection down now. Anything unwritten is lost, so error
   // paths that owe the client a reject should use closeAfterFlush.
   void close(std::string_view reason) override;
+  void resumeReads() override;
 
   uint32_t sessionId() const noexcept override { return m_session_id; }
   uint32_t traderId() const noexcept { return m_trader_id; }
@@ -94,6 +95,7 @@ class TcpSession : public ClientSession,
   // TCP backpressure reaches the client. Shared with WebSocketSession, since
   // getting the ordering wrong there would be the same bug twice.
   std::optional<SessionPump> m_pump{};
+  bool m_reading{false};
   bool m_closing{false};
   bool m_flush_then_close{false};
   std::string m_close_reason{};

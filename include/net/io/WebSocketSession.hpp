@@ -46,6 +46,7 @@ class WebSocketSession : public ClientSession,
 
   void deliver(std::span<const Event> events) override;
   void close(std::string_view reason) override;
+  void resumeReads() override;
 
   uint32_t sessionId() const noexcept override { return m_session_id; }
   bool loggedOn() const noexcept { return m_trader_id != 0; }
@@ -65,6 +66,7 @@ class WebSocketSession : public ClientSession,
 
   boost::beast::flat_buffer m_buffer{};
   std::deque<std::string> m_outbox{};
+  bool m_reading{false};
   bool m_writing{false};
   bool m_closing{false};
 

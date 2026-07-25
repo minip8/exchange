@@ -1,8 +1,8 @@
 #include "net/io/IoThread.hpp"
 
 #include <chrono>
-#include <print>
 
+#include "net/io/Log.hpp"
 #include "net/io/TcpSession.hpp"
 
 namespace Exchange::Net {
@@ -12,7 +12,7 @@ void IoThread::start() {
     try {
       m_context.run();
     } catch (const std::exception& error) {
-      std::println(stderr, "io thread {} died: {}", m_index, error.what());
+      logError("io thread {} died: {}", m_index, error.what());
     }
   }};
 }
@@ -44,6 +44,31 @@ void IoThread::dispatch(std::span<const Event> events) {
     // matching thread was producing events for it.
     start = end;
   }
+}
+
+void IoThread::onIngressFull() {
+  if (m_reads_suspended) return;
+  m_reads_suspended = true;
+  ++m_suspensions;
+  checkIngressPressure();
+}
+
+void IoThread::checkIngressPressure() {
+  if (m_ring.freeSlots() >= kResumeFreeSlots) {
+    m_reads_suspended = false;
+    // all() snapshots, so a session closing inside resumeReads cannot
+    // invalidate the iteration.
+    for (const auto& session : m_sessions.all()) session->resumeReads();
+    return;
+  }
+  m_pressure_timer.expires_after(std::chrono::microseconds{200});
+  m_pressure_timer.async_wait([this](const boost::system::error_code& ec) {
+    if (ec) {
+      m_reads_suspended = false;
+      return;
+    }
+    checkIngressPressure();
+  });
 }
 
 void IoThread::enqueueCritical(const Command& command) {

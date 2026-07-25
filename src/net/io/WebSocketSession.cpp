@@ -2,8 +2,8 @@
 
 #include <boost/beast/core/bind_handler.hpp>
 #include <chrono>
-#include <print>
 
+#include "net/io/Log.hpp"
 #include "net/wire/JsonProtocol.hpp"
 
 namespace Exchange::Net {
@@ -26,7 +26,7 @@ WebSocketSession::WebSocketSession(tcp::socket socket, SessionContext context,
   if (!ec && endpoint.address().is_v4()) {
     m_peer_ip = endpoint.address().to_v4().to_uint();
   }
-  m_pump.emplace(m_context.ring, m_stream.get_executor(), [this] { doRead(); });
+  m_pump.emplace(m_context.io, m_stream.get_executor(), [this] { doRead(); });
 }
 
 void WebSocketSession::run(
@@ -53,11 +53,15 @@ void WebSocketSession::run(
                         });
 }
 
+void WebSocketSession::resumeReads() { doRead(); }
+
 void WebSocketSession::doRead() {
-  if (m_closing || m_pump->readsSuspended()) return;
+  if (m_closing || m_reading) return;
+  if (m_context.io.readsSuspended()) return;
   auto self{shared_from_this()};
   m_stream.async_read(
       m_buffer, [this, self](const boost::system::error_code& ec, std::size_t) {
+        m_reading = false;
         if (ec) {
           close(ec == websocket::error::closed ? "peer closed" : ec.message());
           return;
@@ -68,6 +72,7 @@ void WebSocketSession::doRead() {
         m_buffer.consume(m_buffer.size());
         doRead();
       });
+  m_reading = true;
 }
 
 void WebSocketSession::onMessage(std::string_view text) {
@@ -99,9 +104,10 @@ void WebSocketSession::onMessage(std::string_view text) {
     }
     m_trader_id = outcome.trader_id;
     result.command.trader_id = m_trader_id;
+    static_cast<void>(m_pump->tryReserve());
     m_pump->submit(result.command);
-    std::println("ws session {:#x} logged on as trader {} ({})", m_session_id,
-                 outcome.trader_id, outcome.name);
+    logLine("ws session {:#x} logged on as trader {} ({})", m_session_id,
+            outcome.trader_id, outcome.name);
     return;
   }
 
@@ -116,6 +122,11 @@ void WebSocketSession::onMessage(std::string_view text) {
     return;
   }
 
+  if (!m_pump->tryReserve()) {
+    sendReject(RejectCode::Throttled, result.command.client_order_id,
+               result.command.order_id);
+    return;
+  }
   m_pump->submit(result.command);
 }
 
@@ -140,6 +151,9 @@ void WebSocketSession::deliver(std::span<const Event> events) {
   for (const Event& event : events) {
     std::string text{Json::encode(event)};
     if (!text.empty()) m_outbox.push_back(std::move(text));
+    if ((event.flags & EventFlags::kCommandComplete) != 0) {
+      m_pump->onCommandComplete();
+    }
   }
   doWrite();
 }
@@ -193,6 +207,6 @@ void WebSocketSession::close(std::string_view reason) {
   m_stream.next_layer().shutdown(tcp::socket::shutdown_both, ec);
   m_stream.next_layer().close(ec);
   m_context.io.sessions().remove(m_session_id);
-  std::println("ws session {:#x} closed: {}", m_session_id, reason);
+  logLine("ws session {:#x} closed: {}", m_session_id, reason);
 }
 }  // namespace Exchange::Net

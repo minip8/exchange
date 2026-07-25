@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -45,6 +46,11 @@ class Server {
  private:
   void acceptBinary(tcp::socket socket);
   void acceptHttp(tcp::socket socket);
+  // Moves a freshly accepted socket to the I/O thread that will own it, then
+  // calls `make` on that thread. See the comment on the definition.
+  void handOff(tcp::socket socket, std::size_t target,
+               std::function<void(tcp::socket, IoThread&)> make);
+  std::size_t nextIoThread() noexcept;
 
   ServerConfig m_config;
   TraderDirectory m_traders{};
@@ -53,6 +59,10 @@ class Server {
   std::unique_ptr<MatchingThread> m_matching{};
   std::shared_ptr<Listener> m_binary_listener{};
   std::shared_ptr<Listener> m_http_listener{};
+  // Round-robin, not least-loaded: with a handful of long-lived sessions
+  // the difference is noise, and a load metric would need to be shared
+  // across threads to be read here.
+  std::size_t m_next_io_thread{0};
   bool m_running{false};
 };
 }  // namespace Exchange::Net

@@ -82,11 +82,32 @@ void MatchingLoop::emitToTrader(uint32_t trader_id, const Event& prototype) {
   }
 }
 
-void MatchingLoop::flush() {
+void MatchingLoop::flush(uint32_t origin_session) {
   if (m_out.empty()) return;
   // The GUI coalesces rendering on this flag, so a burst of level updates
   // paints once rather than once per level.
   m_out.back().flags |= EventFlags::kEndOfBatch;
+
+  /*
+  Mark the last event addressed back to the commanding session, so its I/O
+  thread can decrement an exact in-flight count. Searching backwards is
+  right: a command's own ack comes first and its market-data consequences
+  last, and it is the last one that means "finished".
+
+  Every client-originated command produces at least one event for its own
+  session — that is why MdAck exists — so this loop finding nothing means
+  either origin_session is 0 or the command came from somewhere that is not
+  counting credits. Both are fine; nothing leaks either way.
+  */
+  if (origin_session != 0) {
+    for (auto it{m_out.rbegin()}; it != m_out.rend(); ++it) {
+      if (it->session_id == origin_session) {
+        it->flags |= EventFlags::kCommandComplete;
+        break;
+      }
+    }
+  }
+
   m_sink.publish(m_out);
   m_out.clear();
 }
@@ -137,7 +158,8 @@ void MatchingLoop::handle(const Command& command) {
       reject(command, RejectCode::MalformedMessage);
       break;
   }
-  flush();
+  // SessionClosed passes 0: there is no session left to credit.
+  flush(command.type == CommandType::SessionClosed ? 0 : command.session_id);
 }
 
 void MatchingLoop::handleBatch(std::span<const Command> commands) {
@@ -682,6 +704,21 @@ void MatchingLoop::onUnsubscribeMd(const Command& command) {
     return;
   }
   m_publisher.unsubscribe(info->id, command.session_id);
+
+  // Acked rather than silent, so the client knows the feed stopped on
+  // purpose — and so this command, like every other, produces an event for
+  // its own session. See EventFlags::kCommandComplete.
+  Event ack{base(command, EventType::MdAck)};
+  ack.book_id = static_cast<uint32_t>(info->id.value);
+  ack.payload.md = MdPayload{.md_seq = m_publisher.sequence(info->id),
+                             .price = 0,
+                             .quantity = 0,
+                             .ts_ns = command.recv_ts_ns,
+                             .aggregate = 0,
+                             .depth = info->md_depth,
+                             .level_side = Side::Buy,
+                             .pad = {}};
+  m_out.push_back(ack);
 }
 
 void MatchingLoop::onGetSnapshot(const Command& command) {
