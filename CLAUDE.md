@@ -72,10 +72,12 @@ Formatting: `.clang-format` is `BasedOnStyle: Google` (2-space indent). Run `cla
 
 ## Architecture
 
-Two namespaces: `Exchange::Types` (value types in `include/types/`) and `Exchange::Engine` (logic in `include/engine/` + `src/engine/`).
+Two namespaces: `Exchange::Types` (value types in `include/types/`) and `Exchange::Engine` (logic in `include/engine/` + `src/engine/`). Engine headers pull the value types in with a `using namespace Exchange::Types;` *inside* `namespace Exchange::Engine` — never a using-directive at file scope, which would leak into every TU that includes the header.
 
 ### Strong-typedef value types (`include/types/`)
-Every domain scalar is a distinct struct wrapping a raw integer/`time_point` (`OrderId`, `OrderPrice`, `OrderQuantity`, `OrderBookId`, `OrderTime`, plus the `OrderSide` enum and `EngineError`). They are **not** interchangeable with their underlying `T` — construction is `explicit`, comparison is via defaulted `operator<=>`, and only `OrderQuantity` defines arithmetic. `OrderId`/`OrderBookId` ship `std::hash` specializations so they can key `unordered_map`. When adding a field, follow this pattern rather than passing bare `uint64_t`.
+Every domain scalar is a distinct struct wrapping a raw underlying `T` — an integer (`OrderId`, `OrderPrice`, `OrderQuantity`, `OrderBookId`), a `time_point` (`OrderTime`), or a `std::string` (`Symbol`) — plus the `OrderSide` and `EngineError` enums. They are **not** interchangeable with their underlying `T` — construction is `explicit`, comparison is via defaulted `operator<=>`, and only `OrderQuantity` defines arithmetic. `OrderId`/`OrderBookId`/`Symbol` ship `std::hash` specializations so they can key `unordered_map`. There is no umbrella header; consumers include individual headers by path (`#include "types/OrderId.hpp"`). When adding a field, follow this pattern rather than passing bare `uint64_t`.
+
+`Symbol` (`include/types/Symbol.hpp`) is **currently unused** — nothing includes it, so it is never compiled. Its `std::hash` specialization hints at an intended `unordered_map<Symbol, OrderBookId>` lookup in `MatchingEngine`, which does not exist yet.
 
 IDs are assigned by a **`static inline instance_count` counter** on `Order` and `OrderBook` — every constructed `Order`/`OrderBook` auto-increments a global counter. IDs are process-wide monotonic, not per-book, and not user-supplied.
 

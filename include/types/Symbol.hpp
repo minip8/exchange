@@ -6,22 +6,20 @@
 #include <string>
 #include <utility>
 
-namespace Exchange::Engine::Types {
+namespace Exchange::Types {
 struct Symbol {
   using T = std::string;
-  std::string value;
+  T value;
 
   explicit Symbol(T value_) : value(std::move(value_)) {}
 
   std::strong_ordering operator<=>(const Symbol&) const = default;
 };
-}  // namespace Exchange::Engine::Types
-
-using namespace Exchange::Engine::Types;
+}  // namespace Exchange::Types
 
 template <>
-struct std::hash<Symbol> {
-  size_t operator()(const Symbol& symbol) const noexcept {
+struct std::hash<Exchange::Types::Symbol> {
+  size_t operator()(const Exchange::Types::Symbol& symbol) const noexcept {
     return std::hash<std::string>{}(symbol.value);
   }
 };
