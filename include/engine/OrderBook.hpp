@@ -1,7 +1,6 @@
 #pragma once
 
 #include <expected>
-#include <functional>
 #include <optional>
 #include <unordered_map>
 #include <utility>
@@ -20,9 +19,6 @@ namespace Exchange::Engine {
 using namespace Exchange::Types;
 class OrderBook {
  private:
-  using match_predicate_t = std::function_ref<bool(
-      const Order& aggressing_order, const Order& resting_order)>;
-
   constexpr static inline auto m_match_buy_aggressor{
       [](const Order& aggressing_order, const Order& resting_order) {
         return aggressing_order.price >= resting_order.price;
