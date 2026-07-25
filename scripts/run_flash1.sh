@@ -15,7 +15,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HARNESS_DIR="${REPO_ROOT}/external/matching-engine-benchmark"
-BUILD_DIR="${REPO_ROOT}/build-release"
+BUILD_DIR="${REPO_ROOT}/build/release"
 ADAPTER="${BUILD_DIR}/bench/flash1/adapter.so"
 
 require_harness() {
@@ -34,16 +34,13 @@ require_adapter() {
 cmd="${1:-}"
 case "${cmd}" in
   build)
-    # Dedicated single-config Release tree, deliberately NOT the shared build/.
-    # The adapter itself is sanitizer-free in any config (it compiles
-    # OrderBook.cpp directly rather than linking engine/debug_options), so this
-    # is not about sanitizers — it is about owning the generator and config.
-    # build/ is user-controlled: it has been both Ninja Multi-Config and plain
-    # Ninja/Debug, and against a single-config tree `--build --config Release`
-    # is SILENTLY IGNORED, yielding a Debug adapter at a different path. Perf
-    # numbers must not depend on how build/ happens to be configured today.
-    cmake -S "${REPO_ROOT}" -B "${BUILD_DIR}" -G Ninja -DCMAKE_BUILD_TYPE=Release
-    cmake --build "${BUILD_DIR}" --target flash1_adapter
+    # The release preset pins generator and config, so the adapter path is
+    # deterministic and perf numbers never depend on how a tree happens to be
+    # configured today. The adapter is additionally sanitizer-free in any
+    # config: it compiles OrderBook.cpp directly rather than linking engine,
+    # so debug_options never reaches it.
+    # cmake --preset resolves CMakePresets.json from the CWD, hence the cd.
+    (cd "${REPO_ROOT}" && cmake --preset release && cmake --build --preset flash1)
     echo "Adapter: ${ADAPTER}"
     ;;
   audit | perf)

@@ -49,13 +49,13 @@ DIRTY=false
 [[ -n "$(git -C "${REPO_ROOT}" status --porcelain)" ]] && DIRTY=true
 
 # --- Google Benchmark suite (Release; Debug numbers are sanitized garbage) ---
-if [[ ! -f "${REPO_ROOT}/build/CMakeCache.txt" ]]; then
-  cmake -S "${REPO_ROOT}" -B "${REPO_ROOT}/build" -G "Ninja Multi-Config"
-fi
-cmake --build "${REPO_ROOT}/build" --config Release --target exchange_bench
+# Configure unconditionally: the release preset pins generator and config, so
+# this cannot inherit a stale tree and silently benchmark the wrong binary.
+# cmake --preset resolves CMakePresets.json from the CWD, hence the cd.
+(cd "${REPO_ROOT}" && cmake --preset release && cmake --build --preset bench)
 GB_JSON="$(mktemp /tmp/exchange_gb.XXXXXX.json)"
 trap 'rm -f "${GB_JSON}"' EXIT
-"${REPO_ROOT}/build/bench/google/Release/exchange_bench" \
+"${REPO_ROOT}/build/release/bench/google/exchange_bench" \
   --benchmark_format=console --benchmark_out_format=json --benchmark_out="${GB_JSON}"
 
 # --- flash1 harness (perf mode; audit measures correctness, not throughput) ---

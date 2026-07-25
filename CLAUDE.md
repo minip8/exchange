@@ -8,37 +8,41 @@ A single-threaded, in-memory limit-order-book matching engine written in **C++26
 
 ## Build & Run
 
-The build uses **CMake + Ninja Multi-Config** with **g++** (see `build/CMakeCache.txt`). C++26 with `-fexperimental-library`-level features (`std::expected`, `std::print`, `std::function_ref`, explicit object parameters / "deducing `this`").
+The build uses **CMake + Ninja** with **g++**, driven entirely through `CMakePresets.json`. C++26 with `-fexperimental-library`-level features (`std::expected`, `std::print`, `std::function_ref`, explicit object parameters / "deducing `this`").
 
-Because the generator is **Ninja Multi-Config**, `CMAKE_BUILD_TYPE` is unset and has no effect — configs are selected at *build* time with `--config`, and artifacts land in a per-config subdirectory (`build/Debug/`, `build/Release/`). `Debug` is the default config and enables ASan/UBSan/LSan + `_GLIBCXX_DEBUG`.
+Two **single-config** trees, one per config, each pinned by a preset: `build/debug/` (the development default — ASan/UBSan/LSan + `_GLIBCXX_DEBUG`) and `build/release/` (optimized, sanitizer-free, the only config benchmarks may run in). Because the trees are single-config, artifacts land directly in the tree with **no per-config subdirectory**, and `--config` is never used — passing it to a single-config tree is silently ignored, which is exactly the failure this layout exists to prevent. Always address a tree by its preset, never by an ad-hoc `-B` path.
 
 ```bash
-# Configure once — both Debug and Release configs are set up by this single step
-cmake -S . -B build -G "Ninja Multi-Config"
+# Configure (once per tree; re-running is idempotent and cheap)
+cmake --preset debug
+cmake --preset release
 
-# Build everything (defaults to Debug)
-cmake --build build
-cmake --build build --config Release
+# Build
+cmake --build --preset debug      # everything, Debug
+cmake --build --preset release    # everything, Release
+cmake --build --preset bench      # just exchange_bench (Release)
+cmake --build --preset flash1     # just the flash1 adapter (Release)
 
 # Run the smoke-test executable
-./build/Debug/app
+./build/debug/app
 
-# Build & run benchmarks
-cmake --build build --config Release --target exchange_bench
-./build/bench/google/Release/exchange_bench
+# Run benchmarks
+./build/release/bench/google/exchange_bench
 
 # Run a single benchmark by name (regex)
-./build/bench/google/Release/exchange_bench --benchmark_filter='BM_AddOrder.*'
+./build/release/bench/google/exchange_bench --benchmark_filter='BM_AddOrder.*'
 
 # JSON output for regression gating (see bench/google/CMakeLists.txt for the intended CI flow)
-./build/bench/google/Release/exchange_bench --benchmark_format=json > bench_results.json
+./build/release/bench/google/exchange_bench --benchmark_format=json > bench_results.json
 ```
+
+`cmake --preset` resolves `CMakePresets.json` from the **current working directory**, so scripts that may be invoked from anywhere must `cd` to the repo root first (both `scripts/run_flash1.sh` and `scripts/bench_pipeline.sh` do).
 
 There is **no unit-test suite** — correctness is currently exercised only via `src/main.cpp` and the benchmarks.
 
 `bench/CMakeLists.txt` is a pure dispatcher over two peer suites, each owning its own `CMakeLists.txt`: `bench/google/` (the Google Benchmark microbenchmarks — target `exchange_bench`, which also pins the googlebenchmark FetchContent dependency) and `bench/flash1/` (the external conformance harness adapter). Benchmark results and plots land in the gitignored `bench/results/`.
 
-**Always benchmark the Release config.** `exchange_bench` sets `-O3 -march=native` on itself in every config, but it links `engine`, which propagates `debug_options` as a PUBLIC dependency — so the Debug bench binary is still built with ASan/UBSan/LSan and `_GLIBCXX_DEBUG`. Optimized *and* sanitized numbers are meaningless. Keep Debug for development so the sanitizers catch bugs.
+**Always benchmark the Release config.** `exchange_bench` sets `-O3 -march=native` on itself in every config, but it links `engine`, which propagates `debug_options` as a PUBLIC dependency — so a bench binary built in `build/debug/` is still built with ASan/UBSan/LSan and `_GLIBCXX_DEBUG`. Optimized *and* sanitized numbers are meaningless. Keep Debug for development so the sanitizers catch bugs.
 
 ### flash1 benchmark harness
 
@@ -46,7 +50,7 @@ The [flash1-dev/matching-engine-benchmark](https://github.com/flash1-dev/matchin
 
 ```bash
 scripts/fetch_harness.sh                 # one-time: clone + build the harness into external/
-scripts/run_flash1.sh build              # build adapter.so into build-release/
+scripts/run_flash1.sh build              # build adapter.so into build/release/
 scripts/run_flash1.sh audit  [scenario]  # correctness + book state audit
 scripts/run_flash1.sh perf   [scenario]  # timed run (also verifies the hash)
 scripts/run_flash1.sh challenge          # 10 perf + 1 audit per scenario, worst-case result
@@ -56,7 +60,7 @@ Also available: `conformance` (pre-flight check) and `explain <scenario>`, which
 
 Scenarios: `static | normal | swing-25 | swing-40 | flash-crash`. Requires `libboost-dev` (installed system-wide); the scripts hardcode no Boost paths.
 
-`run_flash1.sh build` uses a dedicated single-config `build-release/` tree, deliberately *not* the shared `build/`. The adapter compiles `OrderBook.cpp` directly rather than linking `engine`, so it is sanitizer-free in any config — the separate tree is about owning the generator and config, not about sanitizers.
+`run_flash1.sh build` builds `flash1_adapter` via the `release` preset, so the adapter path is deterministic and perf numbers never depend on how some tree happens to be configured. The adapter is additionally sanitizer-free in *any* config: it compiles `OrderBook.cpp` directly rather than linking `engine`, so `debug_options` never reaches it.
 
 ### Benchmark pipeline (run + record + plot)
 

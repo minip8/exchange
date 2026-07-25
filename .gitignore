@@ -2,7 +2,7 @@
 .cache/
 CMakeFiles/
 build/
-build-release/
 external/
+compile_commands.json
 bench_results.json
 bench/results/

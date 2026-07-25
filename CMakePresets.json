@@ -1,0 +1,54 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "debug",
+      "inherits": "base",
+      "displayName": "Debug (ASan/UBSan/LSan + _GLIBCXX_DEBUG)",
+      "description": "Development default. Never benchmark this config.",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "release",
+      "inherits": "base",
+      "displayName": "Release (benchmarks)",
+      "description": "Optimized and sanitizer-free — the only config perf numbers may come from.",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "debug"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
+      "name": "bench",
+      "configurePreset": "release",
+      "displayName": "Google Benchmark suite",
+      "targets": ["exchange_bench"]
+    },
+    {
+      "name": "flash1",
+      "configurePreset": "release",
+      "displayName": "flash1 harness adapter",
+      "targets": ["flash1_adapter"]
+    }
+  ]
+}
