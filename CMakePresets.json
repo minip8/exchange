@@ -16,7 +16,18 @@
       "displayName": "Debug (ASan/UBSan/LSan + _GLIBCXX_DEBUG)",
       "description": "Development default. Never benchmark this config.",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug"
+        "CMAKE_BUILD_TYPE": "Debug",
+        "EXCHANGE_SANITIZER": "address"
+      }
+    },
+    {
+      "name": "tsan",
+      "inherits": "base",
+      "displayName": "Debug + ThreadSanitizer",
+      "description": "The only config that can validate the SPSC rings' memory ordering. TSan cannot coexist with ASan, hence the separate tree. Never benchmark this config either.",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "EXCHANGE_SANITIZER": "thread"
       }
     },
     {
@@ -35,6 +46,11 @@
       "configurePreset": "debug"
     },
     {
+      "name": "tsan",
+      "configurePreset": "tsan",
+      "displayName": "Everything, ThreadSanitizer"
+    },
+    {
       "name": "release",
       "configurePreset": "release"
     },
@@ -49,6 +65,30 @@
       "configurePreset": "release",
       "displayName": "flash1 harness adapter",
       "targets": ["flash1_adapter"]
+    },
+    {
+      "name": "server",
+      "configurePreset": "release",
+      "displayName": "exchange_server (Release)",
+      "targets": ["exchange_server"]
+    },
+    {
+      "name": "cli",
+      "configurePreset": "release",
+      "displayName": "exchange_cli (Release)",
+      "targets": ["exchange_cli"]
+    },
+    {
+      "name": "smoke",
+      "configurePreset": "debug",
+      "displayName": "net_smoke (ASan/UBSan)",
+      "targets": ["net_smoke"]
+    },
+    {
+      "name": "smoke-tsan",
+      "configurePreset": "tsan",
+      "displayName": "net_smoke (ThreadSanitizer)",
+      "targets": ["net_smoke"]
     }
   ]
 }

@@ -6,3 +6,6 @@ external/
 compile_commands.json
 bench_results.json
 bench/results/
+
+# Real trader credentials. Only the .example.json is checked in.
+config/traders.json
