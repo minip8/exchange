@@ -1,25 +1,24 @@
 /*
 exchange_server — the networked front end for the matching engine.
 
-Phase 0: binds both listening sockets and waits for SIGINT. The point of
-shipping this first is that it forces the CMake-4.4 / CONFIG-mode-Boost
-question and the separate-compilation build times to be answered on day one,
-before any protocol code exists to obscure them.
+Argument parsing and signal handling only; everything else lives in
+net/io/Server.hpp, which owns the startup and (more importantly) the
+shutdown order.
 */
 #include <boost/asio/io_context.hpp>
-#include <boost/asio/ip/address.hpp>
-#include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/signal_set.hpp>
 #include <charconv>
 #include <cstdlib>
 #include <exception>
 #include <print>
+#include <string>
 #include <string_view>
 
+#include "net/io/Server.hpp"
 #include "net/io/ServerConfig.hpp"
 
 namespace asio = boost::asio;
-using tcp = asio::ip::tcp;
+using Exchange::Net::Server;
 using Exchange::Net::ServerConfig;
 
 namespace {
@@ -42,6 +41,9 @@ bool parseArgs(int argc, char** argv, ServerConfig& config) {
 
     if (arg == "--binary-port") {
       if (!next(value) || !parseUint(value, config.binary_port)) return false;
+    } else if (arg == "--binary-bind") {
+      if (!next(value)) return false;
+      config.binary_bind = std::string{value};
     } else if (arg == "--http-port") {
       if (!next(value) || !parseUint(value, config.http_port)) return false;
     } else if (arg == "--io-threads") {
@@ -59,9 +61,10 @@ bool parseArgs(int argc, char** argv, ServerConfig& config) {
       config.web_root = std::string{value};
     } else if (arg == "--help" || arg == "-h") {
       std::println(
-          "usage: exchange_server [--binary-port N] [--http-port N]\n"
-          "                       [--io-threads N] [--spin-us N]\n"
-          "                       [--traders PATH] [--web-root PATH]");
+          "usage: exchange_server [--binary-port N] [--binary-bind ADDR]\n"
+          "                       [--http-port N] [--io-threads N]\n"
+          "                       [--spin-us N] [--traders PATH]\n"
+          "                       [--web-root PATH]");
       std::exit(0);
     } else {
       std::println(stderr, "unknown argument: {}", arg);
@@ -70,18 +73,6 @@ bool parseArgs(int argc, char** argv, ServerConfig& config) {
   }
   return true;
 }
-
-// Bound with reuse_address so a restart after a crash is not blocked by
-// lingering TIME_WAIT sockets.
-tcp::acceptor bindListener(asio::io_context& io, std::string_view host,
-                           uint16_t port) {
-  const tcp::endpoint endpoint{asio::ip::make_address(host), port};
-  tcp::acceptor acceptor{io, endpoint.protocol()};
-  acceptor.set_option(asio::socket_base::reuse_address{true});
-  acceptor.bind(endpoint);
-  acceptor.listen(asio::socket_base::max_listen_connections);
-  return acceptor;
-}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -89,23 +80,26 @@ int main(int argc, char** argv) {
   if (!parseArgs(argc, argv, config)) return 2;
 
   try {
-    asio::io_context io{static_cast<int>(config.io_threads)};
+    Server server{config};
+    std::string error{};
+    if (!server.start(error)) {
+      std::println(stderr, "fatal: {}", error);
+      return 1;
+    }
 
-    tcp::acceptor binary{
-        bindListener(io, config.binary_bind, config.binary_port)};
-    tcp::acceptor http{bindListener(io, config.http_bind, config.http_port)};
-
-    std::println("binary  {}:{}", config.binary_bind, config.binary_port);
-    std::println("http/ws {}:{}", config.http_bind, config.http_port);
-    std::println("io threads {}, spin {}us", config.io_threads, config.spin_us);
-
-    asio::signal_set signals{io, SIGINT, SIGTERM};
+    /*
+    Signals are handled on the main thread, in a context of their own, not on
+    an I/O thread. Server::stop() joins the I/O threads, so a handler running
+    on one of them would join itself and deadlock.
+    */
+    asio::io_context signals_context{1};
+    asio::signal_set signals{signals_context, SIGINT, SIGTERM};
     signals.async_wait([&](const boost::system::error_code&, int signal) {
       std::println("signal {} — shutting down", signal);
-      io.stop();
+      server.stop();
+      signals_context.stop();
     });
-
-    io.run();
+    signals_context.run();
   } catch (const std::exception& error) {
     std::println(stderr, "fatal: {}", error.what());
     return 1;

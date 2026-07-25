@@ -16,10 +16,16 @@ and for this class of bug it is stronger than most suites would be:
     cmake --build --preset smoke-tsan && ./build/tsan/src/net/net_smoke
 */
 #include <atomic>
+#include <boost/asio/connect.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/read.hpp>
+#include <boost/asio/write.hpp>
 #include <cstring>
 #include <memory>
 #include <optional>
 #include <print>
+#include <random>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -30,6 +36,9 @@ and for this class of bug it is stronger than most suites would be:
 #include "net/core/SpscRing.hpp"
 #include "net/gateway/EventSink.hpp"
 #include "net/gateway/MatchingLoop.hpp"
+#include "net/io/Server.hpp"
+#include "net/wire/BinaryProtocol.hpp"
+#include "net/wire/MessageNames.hpp"
 #include "types/Symbol.hpp"
 
 using namespace Exchange::Net;
@@ -789,6 +798,525 @@ void testDeterminism() {
         "two runs of one script are bit-identical apart from book ids");
 }
 
+// ===========================================================================
+// Layer 3 — codec round-trip and frame-parser fuzzing
+// ===========================================================================
+
+namespace Wire = Exchange::Net::Binary;
+namespace asio = boost::asio;
+using tcp = asio::ip::tcp;
+
+/*
+Zeroes the Event fields the binary protocol deliberately does not carry, so
+the round-trip comparison can be an exact one.
+
+session_id and trader_id are the SERVER's routing state — a client already
+knows its own, and putting them on every message would be 8 wasted bytes per
+frame. LogonAck is the exception, because that is where the client learns
+them, so it is excluded from the normalization.
+*/
+void normalizeForCompare(Event& event) {
+  if (event.type != EventType::LogonAck) {
+    event.session_id = 0;
+    event.trader_id = 0;
+  }
+  // LogonAckBody, BookBody and PositionBody have no flags field: nothing
+  // about those messages is per-batch or per-fill.
+  switch (event.type) {
+    case EventType::LogonAck:
+    case EventType::Reject:
+    case EventType::CreateBookAck:
+    case EventType::BookEntry:
+    case EventType::BookListEnd:
+    case EventType::PositionUpdate:
+      event.flags = 0;
+      break;
+    default:
+      break;
+  }
+  // `side` is only meaningful where a body carries it.
+  if (event.type == EventType::LogonAck || event.type == EventType::Reject ||
+      event.type == EventType::CreateBookAck ||
+      event.type == EventType::BookEntry ||
+      event.type == EventType::BookListEnd ||
+      event.type == EventType::PositionUpdate) {
+    event.side = Side::Buy;
+  }
+  // Neither a logon nor a reject is about a book: LogonAck concerns the
+  // session, and Reject echoes back the ids the client sent. The book
+  // messages carry their id inside the payload instead of the envelope.
+  if (event.type == EventType::LogonAck || event.type == EventType::Reject) {
+    event.book_id = 0;
+  }
+  event.reserved = 0;
+}
+
+bool roundTripsEqual(const Event& original) {
+  std::vector<std::byte> frame{};
+  if (!Wire::encode(original, 1, frame)) return false;
+
+  Wire::Header header{};
+  if (!Wire::readHeader(frame, header)) return false;
+  const auto decoded{Wire::decodeEvent(
+      header.type,
+      std::span<const std::byte>{frame}.subspan(Wire::kHeaderSize))};
+  if (!decoded.has_value()) return false;
+
+  Event lhs{original};
+  Event rhs{*decoded};
+  normalizeForCompare(lhs);
+  normalizeForCompare(rhs);
+  return std::memcmp(&lhs, &rhs, sizeof(Event)) == 0;
+}
+
+void testBinaryCodecRoundTrip() {
+  // --- client -> server: encode, decode, compare the resulting Command ---
+  {
+    std::vector<std::byte> frame{};
+    const Wire::NewOrderBody body{.client_order_id = 42,
+                                  .book_id = 7,
+                                  .price = 1234,
+                                  .quantity = 500,
+                                  .side = 1,
+                                  .tif = 1,
+                                  .flags = 1,
+                                  .pad = {}};
+    Wire::encodeNewOrder(body, 9, frame);
+    const auto result{Wire::decode(frame, kSessionA, kTraderA, 777)};
+    check(result.status == Wire::DecodeStatus::Ok, "a new order decodes");
+    check(result.consumed == frame.size(), "and consumes exactly its frame");
+    const Command& command{result.command};
+    check(command.type == CommandType::NewOrder &&
+              command.client_order_id == 42 && command.book_id == 7 &&
+              command.price == 1234 && command.quantity == 500 &&
+              command.side == Side::Sell && command.tif == TimeInForce::Ioc &&
+              (command.flags & CommandFlags::kMarket) != 0,
+          "every new-order field survives the round trip");
+    // Identity and receive time come from the session, never from the wire.
+    check(command.session_id == kSessionA && command.trader_id == kTraderA &&
+              command.recv_ts_ns == 777,
+          "a client cannot assert its own identity or timestamp");
+  }
+
+  {
+    std::vector<std::byte> frame{};
+    Wire::encodeCreateBook(
+        Wire::CreateBookBody{.symbol = {'N', 'V', 'D', 'A', 0, 0, 0, 0},
+                             .price_scale = 4,
+                             .pad = {}},
+        1, frame);
+    const auto result{Wire::decode(frame, kSessionA, kTraderA, 0)};
+    check(result.status == Wire::DecodeStatus::Ok &&
+              result.command.symbol.view() == "NVDA" && result.command.aux == 4,
+          "a create-book round-trips its symbol and price scale");
+  }
+
+  {
+    // A full 8-character ticker has no terminator, which is the case
+    // Symbol::view() scans for and the one a naive strlen would overrun.
+    std::vector<std::byte> frame{};
+    Wire::encodeCreateBook(
+        Wire::CreateBookBody{.symbol = {'1', '2', '3', '4', '5', '6', '7', '8'},
+                             .price_scale = 2,
+                             .pad = {}},
+        1, frame);
+    const auto result{Wire::decode(frame, kSessionA, kTraderA, 0)};
+    check(result.status == Wire::DecodeStatus::Ok &&
+              result.command.symbol.view() == "12345678",
+          "an unterminated 8-character ticker decodes correctly");
+  }
+
+  // --- multiple frames in one buffer, the normal case for a stream ---
+  {
+    std::vector<std::byte> stream{};
+    Wire::encodeSimple(MsgType::ListBooks, 1, stream);
+    Wire::encodeCancel(Wire::CancelBody{.client_order_id = 5, .order_id = 0}, 2,
+                       stream);
+    std::size_t offset{0};
+    std::size_t frames{0};
+    while (offset < stream.size()) {
+      const auto result{
+          Wire::decode(std::span<const std::byte>{stream}.subspan(offset),
+                       kSessionA, kTraderA, 0)};
+      if (result.status != Wire::DecodeStatus::Ok) break;
+      offset += result.consumed;
+      ++frames;
+    }
+    check(frames == 2 && offset == stream.size(),
+          "two frames in one buffer both parse");
+  }
+
+  // --- a truncated frame asks for more rather than guessing ---
+  {
+    std::vector<std::byte> frame{};
+    Wire::encodeCancel(Wire::CancelBody{.client_order_id = 1, .order_id = 2}, 1,
+                       frame);
+    for (std::size_t prefix{0}; prefix < frame.size(); ++prefix) {
+      const auto result{Wire::decode(
+          std::span<const std::byte>{frame}.subspan(0, prefix), 1, 1, 0)};
+      check(result.status == Wire::DecodeStatus::NeedMore,
+            "a partial frame is never decoded");
+    }
+  }
+
+  // --- server -> client: every event type survives encode/decode ---
+  auto event{[](EventType type) {
+    Event e{};
+    e.type = type;
+    e.session_id = 0x0100'0009;
+    e.trader_id = 3;
+    e.book_id = 11;
+    e.side = Side::Sell;
+    e.flags = EventFlags::kEndOfBatch | EventFlags::kAggressor;
+    return e;
+  }};
+
+  Event logon{event(EventType::LogonAck)};
+  logon.payload.ack = AckPayload{.order_id = 0,
+                                 .client_order_id = 0,
+                                 .orig_order_id = 0,
+                                 .price = 0,
+                                 .quantity = 4,
+                                 .reject_code = RejectCode::None,
+                                 .pad = {}};
+  check(roundTripsEqual(logon), "LogonAck round-trips");
+
+  Event reject{event(EventType::Reject)};
+  reject.payload.ack = AckPayload{.order_id = 8,
+                                  .client_order_id = 9,
+                                  .orig_order_id = 0,
+                                  .price = 0,
+                                  .quantity = 0,
+                                  .reject_code = RejectCode::Throttled,
+                                  .pad = {}};
+  check(roundTripsEqual(reject), "Reject round-trips");
+
+  for (const EventType type :
+       {EventType::OrderAck, EventType::CancelAck, EventType::AmendAck}) {
+    Event ack{event(type)};
+    ack.payload.ack = AckPayload{.order_id = 100,
+                                 .client_order_id = 101,
+                                 .orig_order_id = 99,
+                                 .price = 5000,
+                                 .quantity = 25,
+                                 .reject_code = RejectCode::None,
+                                 .pad = {}};
+    check(roundTripsEqual(ack), "an ack round-trips");
+  }
+
+  Event exec{event(EventType::ExecReport)};
+  exec.payload.exec = ExecPayload{.exec_id = 7,
+                                  .order_id = 8,
+                                  .client_order_id = 9,
+                                  .price = 5000,
+                                  .quantity = 10,
+                                  .leaves = 90};
+  check(roundTripsEqual(exec), "ExecReport round-trips");
+
+  for (const EventType type : {EventType::SnapshotBegin, EventType::LevelUpdate,
+                               EventType::SnapshotEnd, EventType::TradePrint}) {
+    Event md{event(type)};
+    md.payload.md = MdPayload{.md_seq = 12,
+                              .price = 5000,
+                              .quantity = 250,
+                              .ts_ns = 1'700'000'000,
+                              .aggregate = 6,
+                              .depth = 10,
+                              .level_side = Side::Sell,
+                              .pad = {}};
+    check(roundTripsEqual(md), "a market-data message round-trips");
+  }
+
+  for (const EventType type : {EventType::CreateBookAck, EventType::BookEntry,
+                               EventType::BookListEnd}) {
+    Event book{event(type)};
+    book.payload.book = BookPayload{.symbol = Symbol{"NVDA"},
+                                    .book_id = 11,
+                                    .price_scale = 2,
+                                    .index = 1,
+                                    .count = 3,
+                                    .reject_code = RejectCode::None,
+                                    .pad = {}};
+    check(roundTripsEqual(book), "a book message round-trips");
+  }
+
+  Event position{event(EventType::PositionUpdate)};
+  position.payload.pos = PosPayload{.book_id = 11,
+                                    .net_quantity = -50,
+                                    .avg_cost = 5000,
+                                    .realized_pnl = -1234,
+                                    .unrealized_pnl = 99,
+                                    .mark_price = 5010};
+  check(roundTripsEqual(position), "PositionUpdate round-trips");
+
+  // Every named message type must actually be nameable in both directions —
+  // this is what stops the two codecs drifting apart.
+  for (const MessageName& entry : kMessageNames) {
+    check(typeOf(entry.name) == entry.type, "the name table is a bijection");
+  }
+}
+
+/*
+Random bytes into the frame parser.
+
+The parser is the only code in the server that runs before authentication, on
+input an attacker fully controls. It has one job under garbage: never read
+out of bounds, and either consume a frame or ask for more — never both, and
+never neither. Under ASan and UBSan, "did not crash" is a real assertion.
+*/
+void testFrameParserFuzz() {
+  std::mt19937_64 rng{0xF122ED};  // fixed seed: a failure must be repeatable
+  std::vector<std::byte> buffer{};
+  std::size_t decoded{0};
+  std::size_t rejected{0};
+
+  for (int iteration{0}; iteration < 20'000; ++iteration) {
+    const std::size_t size{static_cast<std::size_t>(rng() % 96)};
+    buffer.resize(size);
+    for (std::byte& byte : buffer) {
+      byte = static_cast<std::byte>(rng() & 0xFFu);
+    }
+    // Half the time, force a plausible header so the parser gets past the
+    // cheap length check and into the body handlers.
+    if (size >= Wire::kHeaderSize && (rng() & 1u) != 0) {
+      const Wire::Header header{.length = static_cast<uint16_t>(size),
+                                .type = static_cast<MsgType>(rng() & 0x7Fu),
+                                .version = Wire::kProtocolVersion,
+                                .seq = static_cast<uint32_t>(rng())};
+      std::memcpy(buffer.data(), &header, Wire::kHeaderSize);
+    }
+
+    const auto result{Wire::decode(buffer, 1, 1, 0)};
+    check(result.consumed <= buffer.size(),
+          "the parser never claims to consume more than it was given");
+    switch (result.status) {
+      case Wire::DecodeStatus::Ok:
+        check(result.consumed > 0, "a decoded frame consumes something");
+        ++decoded;
+        break;
+      case Wire::DecodeStatus::UnknownType:
+        check(result.consumed > 0, "a skipped frame consumes something");
+        ++rejected;
+        break;
+      case Wire::DecodeStatus::NeedMore:
+      case Wire::DecodeStatus::Malformed:
+        break;
+    }
+  }
+  // Not an assertion about correctness so much as about the test itself: if
+  // the fuzzer never reached a body handler, it was testing nothing.
+  check(decoded + rejected > 100, "the fuzzer actually reached the handlers");
+}
+
+// ===========================================================================
+// Layer 4 — in-process loopback, end to end over a real socket
+// ===========================================================================
+
+// A minimal blocking client. Not exchange_cli: this one asserts rather than
+// prints, and it must not depend on the tool building.
+class LoopbackClient {
+ public:
+  explicit LoopbackClient(asio::io_context& io) : m_socket(io) {}
+
+  bool connect(uint16_t port) {
+    boost::system::error_code ec{};
+    m_socket.connect(tcp::endpoint{asio::ip::make_address("127.0.0.1"), port},
+                     ec);
+    if (ec) return false;
+    m_socket.set_option(tcp::no_delay{true}, ec);
+    return true;
+  }
+
+  void send(const std::vector<std::byte>& frame) {
+    boost::system::error_code ec{};
+    asio::write(m_socket, asio::buffer(frame), ec);
+  }
+
+  // Reads until `wanted` arrives or the deadline passes. Returns the event.
+  std::optional<Event> await(MsgType wanted, std::chrono::milliseconds timeout =
+                                                 std::chrono::seconds{2}) {
+    const auto deadline{std::chrono::steady_clock::now() + timeout};
+    for (;;) {
+      // Anything already buffered first.
+      while (m_size >= Wire::kHeaderSize) {
+        Wire::Header header{};
+        std::memcpy(&header, m_buffer.data(), Wire::kHeaderSize);
+        if (header.length < Wire::kHeaderSize || m_size < header.length) break;
+        const auto decoded{Wire::decodeEvent(
+            header.type,
+            std::span<const std::byte>{m_buffer.data() + Wire::kHeaderSize,
+                                       header.length - Wire::kHeaderSize})};
+        const MsgType type{header.type};
+        std::memmove(m_buffer.data(), m_buffer.data() + header.length,
+                     m_size - header.length);
+        m_size -= header.length;
+        m_received.push_back(type);
+        if (type == wanted) return decoded;
+      }
+
+      if (std::chrono::steady_clock::now() > deadline) return std::nullopt;
+
+      boost::system::error_code ec{};
+      const std::size_t bytes{m_socket.read_some(
+          asio::buffer(m_buffer.data() + m_size, m_buffer.size() - m_size),
+          ec)};
+      if (ec == asio::error::would_block || ec == asio::error::try_again) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        continue;
+      }
+      if (ec) return std::nullopt;
+      m_size += bytes;
+    }
+  }
+
+  std::size_t countReceived(MsgType type) const {
+    return static_cast<std::size_t>(std::ranges::count(m_received, type));
+  }
+
+  tcp::socket& socket() { return m_socket; }
+
+ private:
+  tcp::socket m_socket;
+  std::vector<std::byte> m_buffer = std::vector<std::byte>(64 * 1024);
+  std::size_t m_size{0};
+  std::vector<MsgType> m_received{};
+};
+
+void testLoopback() {
+  ServerConfig config{};
+  config.binary_port = 0;  // let the OS choose, so the test never collides
+  config.io_threads = 1;
+  config.traders_path = "config/traders.example.json";
+
+  Server server{config};
+  std::string error{};
+  if (!server.start(error)) {
+    check(false, "the loopback server starts");
+    std::println("  (start failed: {})", error);
+    return;
+  }
+  const uint16_t port{server.binaryPort()};
+
+  asio::io_context io{1};
+  LoopbackClient alice{io};
+  LoopbackClient bob{io};
+  check(alice.connect(port) && bob.connect(port),
+        "two clients connect over a real socket");
+  alice.socket().non_blocking(true);
+  bob.socket().non_blocking(true);
+
+  std::vector<std::byte> frame{};
+  uint32_t seq{0};
+
+  Wire::encodeLogon("alice-dev-key-change-me", false, ++seq, frame);
+  alice.send(frame);
+  const auto alice_logon{alice.await(MsgType::LogonAck)};
+  check(alice_logon.has_value() &&
+            alice_logon->payload.ack.reject_code == RejectCode::None,
+        "a valid api key logs on");
+
+  frame.clear();
+  Wire::encodeLogon("bob-dev-key-change-me", false, ++seq, frame);
+  bob.send(frame);
+  check(bob.await(MsgType::LogonAck).has_value(), "so does the second one");
+
+  // A wrong key must be refused, and the connection dropped.
+  {
+    LoopbackClient impostor{io};
+    check(impostor.connect(port), "an unauthenticated client can connect");
+    impostor.socket().non_blocking(true);
+    std::vector<std::byte> bad{};
+    Wire::encodeLogon("definitely-not-a-real-key", false, 1, bad);
+    impostor.send(bad);
+    const auto refusal{impostor.await(MsgType::Reject)};
+    check(refusal.has_value() &&
+              refusal->payload.ack.reject_code == RejectCode::AuthFailed,
+          "a bad api key is refused before anything else happens");
+  }
+
+  frame.clear();
+  Wire::encodeCreateBook(
+      Wire::CreateBookBody{.symbol = {'L', 'O', 'O', 'P', 0, 0, 0, 0},
+                           .price_scale = 2,
+                           .pad = {}},
+      ++seq, frame);
+  alice.send(frame);
+  const auto created{alice.await(MsgType::CreateBookAck)};
+  check(created.has_value() &&
+            created->payload.book.reject_code == RejectCode::None,
+        "a book is created over the wire");
+  const uint64_t book{created.has_value() ? created->payload.book.book_id : 0};
+
+  // Alice rests an offer.
+  frame.clear();
+  Wire::encodeNewOrder(Wire::NewOrderBody{.client_order_id = 1,
+                                          .book_id = book,
+                                          .price = 50,
+                                          .quantity = 100,
+                                          .side = 1,
+                                          .tif = 0,
+                                          .flags = 0,
+                                          .pad = {}},
+                       ++seq, frame);
+  alice.send(frame);
+  const auto rested{alice.await(MsgType::OrderAck)};
+  check(rested.has_value() && rested->payload.ack.quantity == 100,
+        "the offer rests in full");
+
+  // Bob lifts part of it. Both sides must see their own fill.
+  frame.clear();
+  Wire::encodeNewOrder(Wire::NewOrderBody{.client_order_id = 1,
+                                          .book_id = book,
+                                          .price = 50,
+                                          .quantity = 60,
+                                          .side = 0,
+                                          .tif = 0,
+                                          .flags = 0,
+                                          .pad = {}},
+                       ++seq, frame);
+  bob.send(frame);
+
+  const auto bob_fill{bob.await(MsgType::ExecReport)};
+  check(bob_fill.has_value() && bob_fill->payload.exec.quantity == 60 &&
+            bob_fill->payload.exec.price == 50 &&
+            bob_fill->payload.exec.leaves == 0,
+        "the taker is filled in full at the resting price");
+  check(bob_fill.has_value() && (bob_fill->flags & EventFlags::kAggressor) != 0,
+        "and is marked as the aggressor");
+
+  const auto alice_fill{alice.await(MsgType::ExecReport)};
+  check(alice_fill.has_value() && alice_fill->payload.exec.quantity == 60 &&
+            alice_fill->payload.exec.leaves == 40,
+        "the maker sees the same fill, with 40 still working");
+  check(alice_fill.has_value() &&
+            (alice_fill->flags & EventFlags::kAggressor) == 0,
+        "and is not marked as the aggressor");
+
+  // Both counterparties get a position, from opposite sides.
+  const auto bob_position{bob.await(MsgType::PositionUpdate)};
+  const auto alice_position{alice.await(MsgType::PositionUpdate)};
+  check(
+      bob_position.has_value() && bob_position->payload.pos.net_quantity == 60,
+      "the buyer is long 60");
+  check(alice_position.has_value() &&
+            alice_position->payload.pos.net_quantity == -60,
+        "the seller is short 60");
+
+  // Cancelling the remainder returns exactly what was left.
+  frame.clear();
+  Wire::encodeCancel(
+      Wire::CancelBody{
+          .client_order_id = 0,
+          .order_id = rested.has_value() ? rested->payload.ack.order_id : 0},
+      ++seq, frame);
+  alice.send(frame);
+  const auto cancelled{alice.await(MsgType::CancelAck)};
+  check(cancelled.has_value() && cancelled->payload.ack.quantity == 40,
+        "cancelling a partially filled order pulls the remaining 40");
+
+  server.stop();
+}
+
 void testRejectCodes() {
   using Exchange::Types::EngineError;
 
@@ -820,6 +1348,10 @@ int main() {
   testPositions();
   testDisconnect();
   testDeterminism();
+
+  testBinaryCodecRoundTrip();
+  testFrameParserFuzz();
+  testLoopback();
 
   if (g_failures == 0) {
     std::println("net_smoke: all checks passed");

@@ -49,17 +49,30 @@ add_library(net_gateway STATIC
     gateway/BookDirectory.cpp
     gateway/MarketDataPublisher.cpp
     gateway/MatchingLoop.cpp
+    gateway/MatchingThread.cpp
     gateway/OrderStore.cpp
     gateway/Positions.cpp
     gateway/RejectCode.cpp
+    # The binary codec lives here, not in net_io: it needs nothing but
+    # memcpy, and keeping it Boost-free is what lets net_smoke fuzz the
+    # frame parser without linking Asio. The JSON codec, which does need
+    # Boost.JSON, is in net_io.
+    wire/BinaryProtocol.cpp
 )
-target_link_libraries(net_gateway PUBLIC engine net_protocol)
+# MatchingThread runs the poll loop on a thread of its own. Still no Boost.
+target_link_libraries(net_gateway PUBLIC engine net_protocol Threads::Threads)
 
 # ---------------------------------------------------------------------------
 # net_io — sockets, sessions, listeners. Owns the one Boost impl TU.
 # ---------------------------------------------------------------------------
 add_library(net_io STATIC
     boost_impl.cpp
+    io/IoThread.cpp
+    io/Listener.cpp
+    io/PostingEventSink.cpp
+    io/Server.cpp
+    io/TcpSession.cpp
+    io/TraderDirectory.cpp
 )
 target_link_libraries(net_io PUBLIC net_gateway net_boost)
 
@@ -69,9 +82,16 @@ target_link_libraries(net_io PUBLIC net_gateway net_boost)
 add_executable(exchange_server server_main.cpp)
 target_link_libraries(exchange_server PRIVATE net_io)
 
+# The reference client, and the only thing that makes the exchange usable
+# before the browser GUI exists.
+add_executable(exchange_cli ${CMAKE_SOURCE_DIR}/tools/exchange_cli.cpp)
+target_link_libraries(exchange_cli PRIVATE net_io)
+
 # net_smoke links net_gateway only — no Boost, no sockets — so gateway
 # scenarios run deterministically and the build stays fast.
-# Threads, but still no Boost: the ring's two-thread stress test needs
-# std::thread, and nothing else here does.
+# net_smoke links net_io because its last layer runs a real server over a
+# real loopback socket. The first three layers (ring, gateway scenarios,
+# codec) touch none of it — that separation lives in net_gateway, which
+# stays Boost-free so the gateway itself is provably testable without I/O.
 add_executable(net_smoke smoke/net_smoke.cpp)
-target_link_libraries(net_smoke PRIVATE net_gateway Threads::Threads)
+target_link_libraries(net_smoke PRIVATE net_io)
