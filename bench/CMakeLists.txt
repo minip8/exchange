@@ -5,5 +5,9 @@ add_subdirectory(google)
 # fetched — see scripts/fetch_harness.sh).
 add_subdirectory(flash1)
 
-# Networking latency benchmark (target: net_loopback_bench, Release only).
+# Networking measured on the flash1 workload (target: net_workload_bench,
+# Release only). Owns BenchClient.hpp, which loopback below also uses.
+add_subdirectory(net)
+
+# Networking latency micro-probe (target: net_loopback_bench, Release only).
 add_subdirectory(loopback)
