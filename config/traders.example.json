@@ -1,0 +1,13 @@
+{
+  "_comment": [
+    "Copy to config/traders.json (gitignored) and replace every api_key.",
+    "Generate one with:  head -c 24 /dev/urandom | base64",
+    "Trader id 0 is reserved as the not-authenticated sentinel.",
+    "Ownership is by trader id: log two clients on with the same key and",
+    "both see the same orders, fills and position."
+  ],
+  "traders": [
+    { "id": 1, "name": "alice", "api_key": "alice-dev-key-change-me" },
+    { "id": 2, "name": "bob",   "api_key": "bob-dev-key-change-me" }
+  ]
+}
