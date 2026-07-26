@@ -1,5 +1,6 @@
 .vscode/
 .cache/
+.observations/
 CMakeFiles/
 build/
 external/
