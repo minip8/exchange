@@ -44,6 +44,7 @@ constexpr uint64_t kMarketSellPrice{1};
 MatchingLoop::MatchingLoop(EventSink& sink, MatchingLoopConfig config)
     : m_sink(sink), m_config(config) {
   m_out.reserve(256);
+  m_touched_positions.reserve(8);
 }
 
 OrderTime MatchingLoop::nextTime() { return timeFromSeq(++m_seq); }
@@ -56,6 +57,17 @@ Event MatchingLoop::base(const Command& command, EventType type) const {
   event.side = command.side;
   return event;
 }
+
+namespace {
+// Command carries raw wire ids; the gateway's own state is typed. These two
+// are the boundary, and they are the only place the conversion should appear.
+SessionId sessionOf(const Command& command) noexcept {
+  return SessionId{command.session_id};
+}
+TraderId traderOf(const Command& command) noexcept {
+  return TraderId{command.trader_id};
+}
+}  // namespace
 
 void MatchingLoop::reject(const Command& command, RejectCode code) {
   Event event{base(command, EventType::Reject)};
@@ -71,18 +83,18 @@ void MatchingLoop::reject(const Command& command, RejectCode code) {
   m_out.push_back(event);
 }
 
-void MatchingLoop::emitToTrader(uint32_t trader_id, const Event& prototype) {
+void MatchingLoop::emitToTrader(TraderId trader_id, const Event& prototype) {
   const auto it{m_trader_sessions.find(trader_id)};
   if (it == m_trader_sessions.end()) return;
-  for (const uint32_t session_id : it->second) {
+  for (const SessionId session_id : it->second) {
     Event copy{prototype};
-    copy.session_id = session_id;
-    copy.trader_id = trader_id;
+    copy.session_id = session_id.value;
+    copy.trader_id = trader_id.value;
     m_out.push_back(copy);
   }
 }
 
-void MatchingLoop::flush(uint32_t origin_session) {
+void MatchingLoop::flush(SessionId origin_session) {
   if (m_out.empty()) return;
   // The GUI coalesces rendering on this flag, so a burst of level updates
   // paints once rather than once per level.
@@ -99,9 +111,9 @@ void MatchingLoop::flush(uint32_t origin_session) {
   either origin_session is 0 or the command came from somewhere that is not
   counting credits. Both are fine; nothing leaks either way.
   */
-  if (origin_session != 0) {
+  if (origin_session != kNoSession) {
     for (auto it{m_out.rbegin()}; it != m_out.rend(); ++it) {
-      if (it->session_id == origin_session) {
+      if (it->session_id == origin_session.value) {
         it->flags |= EventFlags::kCommandComplete;
         break;
       }
@@ -158,8 +170,13 @@ void MatchingLoop::handle(const Command& command) {
       reject(command, RejectCode::MalformedMessage);
       break;
   }
-  // SessionClosed passes 0: there is no session left to credit.
-  flush(command.type == CommandType::SessionClosed ? 0 : command.session_id);
+  // Every position this command disturbed, as one update each rather than one
+  // per fill leg. Must precede flush(), or they would land in the next batch.
+  emitPositions();
+
+  // SessionClosed passes kNoSession: there is no session left to credit.
+  flush(command.type == CommandType::SessionClosed ? kNoSession
+                                                   : sessionOf(command));
 }
 
 void MatchingLoop::handleBatch(std::span<const Command> commands) {
@@ -172,14 +189,14 @@ void MatchingLoop::handleBatch(std::span<const Command> commands) {
 
 void MatchingLoop::onSessionOpened(const Command& command) {
   m_sessions.insert_or_assign(
-      command.session_id,
+      sessionOf(command),
       SessionInfo{
-          .trader_id = command.trader_id,
+          .trader_id = traderOf(command),
           .cancel_on_disconnect =
               (command.flags & CommandFlags::kCancelOnDisconnect) != 0});
-  auto& sessions{m_trader_sessions[command.trader_id]};
-  if (std::ranges::find(sessions, command.session_id) == sessions.end()) {
-    sessions.push_back(command.session_id);
+  auto& sessions{m_trader_sessions[traderOf(command)]};
+  if (std::ranges::find(sessions, sessionOf(command)) == sessions.end()) {
+    sessions.push_back(sessionOf(command));
   }
 
   Event ack{base(command, EventType::LogonAck)};
@@ -199,7 +216,7 @@ void MatchingLoop::onSessionOpened(const Command& command) {
 }
 
 void MatchingLoop::onSessionClosed(const Command& command) {
-  const auto session_it{m_sessions.find(command.session_id)};
+  const auto session_it{m_sessions.find(sessionOf(command))};
   if (session_it == m_sessions.end()) return;
   const SessionInfo info{session_it->second};
 
@@ -207,21 +224,21 @@ void MatchingLoop::onSessionClosed(const Command& command) {
     // Default behaviour is the other one: resting orders SURVIVE a
     // disconnect, which is what GTC means. Cancel-on-disconnect is opt-in at
     // logon and is the right default for an algo client, not for a browser.
-    for (const OrderId id : m_orders.idsForSession(command.session_id)) {
-      OrderMeta meta{};
-      if (!m_orders.erase(id, meta)) continue;
+    for (const OrderId id : m_orders.idsForSession(sessionOf(command))) {
+      const auto meta{m_orders.erase(id)};
+      if (!meta.has_value()) continue;
       const auto removed{m_engine.removeOrder(id)};
-      if (removed.has_value()) republish(meta.book_id, command.recv_ts_ns);
+      if (removed.has_value()) republish(meta->book_id, command.recv_ts_ns);
     }
   }
 
-  m_publisher.dropSession(command.session_id);
+  m_publisher.dropSession(sessionOf(command));
   m_sessions.erase(session_it);
 
   const auto trader_it{m_trader_sessions.find(info.trader_id)};
   if (trader_it != m_trader_sessions.end()) {
     auto& sessions{trader_it->second};
-    const auto removed{std::ranges::remove(sessions, command.session_id)};
+    const auto removed{std::ranges::remove(sessions, sessionOf(command))};
     sessions.erase(removed.begin(), removed.end());
     if (sessions.empty()) m_trader_sessions.erase(trader_it);
   }
@@ -343,7 +360,7 @@ void MatchingLoop::onNewOrder(const Command& command) {
     return;
   }
 
-  const SessionCoid coid{command.session_id, command.client_order_id};
+  const SessionCoid coid{sessionOf(command), command.client_order_id};
   if (command.client_order_id != 0 && m_orders.coidInUse(coid)) {
     reject(command, RejectCode::DuplicateClientOrderId);
     return;
@@ -389,8 +406,8 @@ void MatchingLoop::onNewOrder(const Command& command) {
   if (leaves > 0 && tif == TimeInForce::Gtc) {
     m_orders.insert(
         order_id,
-        OrderMeta{.trader_id = command.trader_id,
-                  .session_id = command.session_id,
+        OrderMeta{.trader_id = traderOf(command),
+                  .session_id = sessionOf(command),
                   .client_order_id = command.client_order_id,
                   .book_id = info->id,
                   .price = OrderPrice{price},
@@ -402,7 +419,7 @@ void MatchingLoop::onNewOrder(const Command& command) {
   uint64_t remaining{command.quantity};
   for (const Fill& fill : *fills) {
     remaining -= fill.quantity.value;
-    applyFill(command, fill, info->id, command.trader_id,
+    applyFill(command, fill, info->id, traderOf(command),
               command.client_order_id, remaining);
   }
 
@@ -427,7 +444,7 @@ void MatchingLoop::onNewOrder(const Command& command) {
 }
 
 void MatchingLoop::applyFill(const Command& command, const Fill& fill,
-                             OrderBookId book_id, uint32_t aggressor_trader,
+                             OrderBookId book_id, TraderId aggressor_trader,
                              uint64_t aggressor_coid,
                              uint64_t aggressor_leaves) {
   const uint64_t exec_id{m_next_exec_id++};
@@ -453,65 +470,88 @@ void MatchingLoop::applyFill(const Command& command, const Fill& fill,
   // --- resting side ---
   // Fill carries neither owner nor symbol, so this is the lookup that makes
   // the gateway, not the engine, the authority on who owns what.
-  OrderStore::FillResult result{};
-  const bool known{m_orders.applyFill(fill.resting_order_id,
-                                      OrderQuantity{quantity}, result)};
-  if (known) {
+  const auto result{
+      m_orders.applyFill(fill.resting_order_id, OrderQuantity{quantity})};
+  if (result.has_value()) {
     Event resting{};
     resting.book_id = static_cast<uint32_t>(book_id.value);
     resting.type = EventType::ExecReport;
-    resting.side = result.meta.side;
-    if (result.final) resting.flags |= EventFlags::kFinal;
+    resting.side = result->meta.side;
+    if (result->final) resting.flags |= EventFlags::kFinal;
     resting.payload.exec =
         ExecPayload{.exec_id = m_next_exec_id++,
                     .order_id = fill.resting_order_id.value,
-                    .client_order_id = result.meta.client_order_id,
+                    .client_order_id = result->meta.client_order_id,
                     .price = price,
                     .quantity = quantity,
-                    .leaves = result.leaves.value};
-    emitToTrader(result.meta.trader_id, resting);
+                    .leaves = result->leaves.value};
+    emitToTrader(result->meta.trader_id, resting);
   }
 
   m_publisher.publishTrade(book_id, price, quantity,
                            fromEngine(fill.aggressor_side), command.recv_ts_ns,
                            m_out);
 
-  // Positions last, so a client sees the fill that caused the change before
-  // the change itself.
+  /*
+  Position ARITHMETIC is per leg — each one genuinely moves the running
+  average and realized P&L. Position REPORTING is not: the touched pair is
+  recorded here and emitPositions() sends one update per (trader, book) once
+  the command is done. See the protocol note in MatchingLoop.hpp.
+  */
   m_positions.applyFill(aggressor_trader, book_id,
                         fromEngine(fill.aggressor_side), price, quantity);
-  if (known) {
-    m_positions.applyFill(result.meta.trader_id, book_id, result.meta.side,
+  touchPosition(aggressor_trader, book_id);
+  if (result.has_value()) {
+    m_positions.applyFill(result->meta.trader_id, book_id, result->meta.side,
                           price, quantity);
-  }
-  emitPosition(aggressor_trader, book_id);
-  if (known && result.meta.trader_id != aggressor_trader) {
-    emitPosition(result.meta.trader_id, book_id);
+    touchPosition(result->meta.trader_id, book_id);
   }
 }
 
-void MatchingLoop::emitPosition(uint32_t trader_id, OrderBookId book_id) {
-  const auto book{m_engine.getOrderBook(book_id)};
-  if (book.has_value()) {
-    int64_t mark{0};
-    if (m_publisher.mark(book->get(), book_id, mark)) {
-      m_positions.mark(trader_id, book_id, mark);
+void MatchingLoop::touchPosition(TraderId trader_id, OrderBookId book_id) {
+  const TouchedPosition touched{.trader_id = trader_id, .book_id = book_id};
+  if (std::ranges::find(m_touched_positions, touched) ==
+      m_touched_positions.end()) {
+    m_touched_positions.push_back(touched);
+  }
+}
+
+void MatchingLoop::emitPositions() {
+  if (m_touched_positions.empty()) return;
+
+  for (const TouchedPosition& touched : m_touched_positions) {
+    /*
+    Marking happens here rather than per leg, and it loses nothing: addOrder
+    completes the entire match before the first leg is reported, so the book
+    is already in its final state and every per-leg mark would have read the
+    same value. Doing it once removes an engine lookup and a mid computation
+    per leg per trader.
+    */
+    const auto book{m_engine.getOrderBook(touched.book_id)};
+    if (book.has_value()) {
+      const auto mark{m_publisher.mark(book->get(), touched.book_id)};
+      if (mark.has_value()) {
+        m_positions.mark(touched.trader_id, touched.book_id, *mark);
+      }
     }
+
+    const Position* position{
+        m_positions.find(touched.trader_id, touched.book_id)};
+    if (position == nullptr) continue;
+
+    Event event{};
+    event.book_id = static_cast<uint32_t>(touched.book_id.value);
+    event.type = EventType::PositionUpdate;
+    event.payload.pos = PosPayload{.book_id = touched.book_id.value,
+                                   .net_quantity = position->net_quantity,
+                                   .avg_cost = position->avg_cost,
+                                   .realized_pnl = position->realized_pnl,
+                                   .unrealized_pnl = position->unrealizedPnl(),
+                                   .mark_price = position->mark_price};
+    emitToTrader(touched.trader_id, event);
   }
 
-  const Position* position{m_positions.find(trader_id, book_id)};
-  if (position == nullptr) return;
-
-  Event event{};
-  event.book_id = static_cast<uint32_t>(book_id.value);
-  event.type = EventType::PositionUpdate;
-  event.payload.pos = PosPayload{.book_id = book_id.value,
-                                 .net_quantity = position->net_quantity,
-                                 .avg_cost = position->avg_cost,
-                                 .realized_pnl = position->realized_pnl,
-                                 .unrealized_pnl = position->unrealizedPnl(),
-                                 .mark_price = position->mark_price};
-  emitToTrader(trader_id, event);
+  m_touched_positions.clear();
 }
 
 void MatchingLoop::republish(OrderBookId book_id, uint64_t ts_ns) {
@@ -521,15 +561,17 @@ void MatchingLoop::republish(OrderBookId book_id, uint64_t ts_ns) {
   m_publisher.publishDeltas(book->get(), book_id, ts_ns, m_out);
 }
 
-bool MatchingLoop::resolveTarget(const Command& command, OrderId& id,
-                                 OrderMeta& meta) {
+std::optional<MatchingLoop::ResolvedTarget> MatchingLoop::resolveTarget(
+    const Command& command) {
   OrderId target{command.order_id};
   if (command.order_id == 0) {
-    if (!m_orders.resolveCoid(
-            SessionCoid{command.session_id, command.client_order_id}, target)) {
+    const auto resolved{m_orders.resolveCoid(
+        SessionCoid{sessionOf(command), command.client_order_id})};
+    if (!resolved.has_value()) {
       reject(command, RejectCode::UnknownOrder);
-      return false;
+      return std::nullopt;
     }
+    target = *resolved;
   }
 
   const OrderMeta* found{m_orders.find(target)};
@@ -540,35 +582,32 @@ bool MatchingLoop::resolveTarget(const Command& command, OrderId& id,
     // answer. Answering from the store also avoids ever reaching
     // OrderBook::removeOrder with an id it has no entry for.
     reject(command, RejectCode::UnknownOrder);
-    return false;
+    return std::nullopt;
   }
-  if (found->trader_id != command.trader_id) {
+  if (found->trader_id != traderOf(command)) {
     // Logged as NotYourOrder, sent as UnknownOrder: see RejectCode.hpp.
     reject(command, RejectCode::NotYourOrder);
-    return false;
+    return std::nullopt;
   }
 
-  id = target;
-  meta = *found;
-  return true;
+  return ResolvedTarget{.id = target, .meta = *found};
 }
 
 void MatchingLoop::onCancel(const Command& command) {
-  OrderId id{0};
-  OrderMeta meta{};
-  if (!resolveTarget(command, id, meta)) return;
+  const auto target{resolveTarget(command)};
+  if (!target.has_value()) return;
+  const OrderId id{target->id};
+  const OrderMeta& meta{target->meta};
 
   const auto removed{m_engine.removeOrder(id)};
   if (!removed.has_value()) {
     // The store and the book disagree, which should be impossible — the two
     // are updated in lockstep. Drop the stale entry so it cannot rot.
-    OrderMeta stale{};
-    m_orders.erase(id, stale);
+    m_orders.erase(id);
     reject(command, RejectCode::UnknownOrder);
     return;
   }
-  OrderMeta erased{};
-  m_orders.erase(id, erased);
+  m_orders.erase(id);
 
   Event ack{base(command, EventType::CancelAck)};
   ack.book_id = static_cast<uint32_t>(meta.book_id.value);
@@ -615,19 +654,18 @@ void MatchingLoop::onAmend(const Command& command) {
     return;
   }
 
-  OrderId id{0};
-  OrderMeta meta{};
-  if (!resolveTarget(command, id, meta)) return;
+  const auto target{resolveTarget(command)};
+  if (!target.has_value()) return;
+  const OrderId id{target->id};
+  const OrderMeta& meta{target->meta};
 
   const auto removed{m_engine.removeOrder(id)};
   if (!removed.has_value()) {
-    OrderMeta stale{};
-    m_orders.erase(id, stale);
+    m_orders.erase(id);
     reject(command, RejectCode::UnknownOrder);
     return;
   }
-  OrderMeta erased{};
-  m_orders.erase(id, erased);
+  m_orders.erase(id);
 
   const OrderId new_id{m_next_order_id++};
   auto fills{m_engine.addOrder(
@@ -688,12 +726,12 @@ void MatchingLoop::onSubscribeMd(const Command& command) {
     reject(command, RejectCode::UnknownBook);
     return;
   }
-  m_publisher.subscribe(info->id, command.session_id);
+  m_publisher.subscribe(info->id, sessionOf(command));
   // Subscribing and snapshotting happen in the same handler, between two
   // commands, so there is no window in which a delta could slip past the
   // snapshot. See the sequencing note in MarketDataPublisher.hpp.
   m_publisher.emitSnapshot(*m_engine.getOrderBook(info->id), info->id,
-                           command.session_id, command.trader_id,
+                           sessionOf(command), traderOf(command),
                            command.recv_ts_ns, m_out);
 }
 
@@ -703,7 +741,7 @@ void MatchingLoop::onUnsubscribeMd(const Command& command) {
     reject(command, RejectCode::UnknownBook);
     return;
   }
-  m_publisher.unsubscribe(info->id, command.session_id);
+  m_publisher.unsubscribe(info->id, sessionOf(command));
 
   // Acked rather than silent, so the client knows the feed stopped on
   // purpose — and so this command, like every other, produces an event for
@@ -728,7 +766,7 @@ void MatchingLoop::onGetSnapshot(const Command& command) {
     return;
   }
   m_publisher.emitSnapshot(*m_engine.getOrderBook(info->id), info->id,
-                           command.session_id, command.trader_id,
+                           sessionOf(command), traderOf(command),
                            command.recv_ts_ns, m_out);
 }
 }  // namespace Exchange::Net

@@ -13,13 +13,6 @@ namespace {
 // so the parser can always make progress even in the worst case.
 constexpr std::size_t kReadBufferSize{64 * 1024};
 constexpr auto kRetryInterval{std::chrono::microseconds{200}};
-
-uint64_t nowNs() {
-  return static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::system_clock::now().time_since_epoch())
-          .count());
-}
 }  // namespace
 
 TcpSession::TcpSession(tcp::socket socket, SessionContext context,

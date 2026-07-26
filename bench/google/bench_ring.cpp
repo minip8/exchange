@@ -28,6 +28,7 @@ number here is meaningless:
 #include "net/core/Command.hpp"
 #include "net/core/Event.hpp"
 #include "net/core/SpscRing.hpp"
+#include "net/core/Tuning.hpp"
 
 using Exchange::Net::Command;
 using Exchange::Net::cpuPause;

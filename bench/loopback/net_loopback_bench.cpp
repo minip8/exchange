@@ -110,15 +110,15 @@ GatewayResult benchGateway(std::size_t iterations) {
     order.client_order_id = 0;
     order.side = Side::Buy;
     order.price = 1000;
-    uint64_t start{nowNs()};
+    uint64_t start{monotonicNowNs()};
     loop.handle(order);
-    resting.push_back(nowNs() - start);
+    resting.push_back(monotonicNowNs() - start);
 
     order.side = Side::Sell;
     order.price = 1000;
-    start = nowNs();
+    start = monotonicNowNs();
     loop.handle(order);
-    crossing.push_back(nowNs() - start);
+    crossing.push_back(monotonicNowNs() - start);
   }
 
   return GatewayResult{.resting = report("gateway rest", resting),
@@ -198,7 +198,7 @@ TcpResult benchTcp(std::string_view egress, std::size_t iterations,
   // pipelines with a few hundred samples and a p99.9 that is really just the
   // second-largest of them.
   const std::size_t rounds{iterations + warmup};
-  const uint64_t timing_started{nowNs()};
+  const uint64_t timing_started{monotonicNowNs()};
   uint64_t timed_orders{0};
 
   for (std::size_t round{0}; round < rounds; ++round) {
@@ -224,7 +224,7 @@ TcpResult benchTcp(std::string_view egress, std::size_t iterations,
           client.nextSeq(), frame);
     }
 
-    const uint64_t start{nowNs()};
+    const uint64_t start{monotonicNowNs()};
     client.send(frame);
     bool ok{true};
     for (std::size_t i{0}; i < depth; ++i) {
@@ -233,7 +233,7 @@ TcpResult benchTcp(std::string_view egress, std::size_t iterations,
         break;
       }
     }
-    const uint64_t elapsed{nowNs() - start};
+    const uint64_t elapsed{monotonicNowNs() - start};
     if (!ok) break;
     if (timed) {
       // Per-order, so depths are directly comparable.
@@ -242,7 +242,7 @@ TcpResult benchTcp(std::string_view egress, std::size_t iterations,
     }
   }
 
-  const double seconds{static_cast<double>(nowNs() - timing_started) / 1e9};
+  const double seconds{static_cast<double>(monotonicNowNs() - timing_started) / 1e9};
   result.orders_per_second =
       seconds > 0 ? static_cast<double>(timed_orders) / seconds : 0;
   result.stats = server.egressStats();

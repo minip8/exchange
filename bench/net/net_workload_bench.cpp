@@ -286,9 +286,9 @@ GatewayResult benchGateway(const std::vector<WorkloadRecord>& records) {
     const std::vector<Command> commands{
         buildCommands(records, kSession, kTrader, book)};
 
-    const uint64_t start{nowNs()};
+    const uint64_t start{monotonicNowNs()};
     loop.handleBatch(commands);
-    const uint64_t elapsed{nowNs() - start};
+    const uint64_t elapsed{monotonicNowNs() - start};
 
     result.msgs_per_s = elapsed > 0 ? static_cast<double>(records.size()) *
                                           1e9 / static_cast<double>(elapsed)
@@ -309,9 +309,9 @@ GatewayResult benchGateway(const std::vector<WorkloadRecord>& records) {
     std::vector<uint64_t> samples{};
     samples.reserve(commands.size());
     for (const Command& command : commands) {
-      const uint64_t start{nowNs()};
+      const uint64_t start{monotonicNowNs()};
       loop.handle(command);
-      samples.push_back(nowNs() - start);
+      samples.push_back(monotonicNowNs() - start);
     }
     result.ns = percentilesOf(std::move(samples));
   }
@@ -516,7 +516,7 @@ ClientResult runClient(const Options& options, const EncodedShare& share,
 
   auto on_event{[&](MsgType type, const std::optional<Event>& event) {
     if (!event.has_value()) return;
-    const uint64_t now{nowNs()};
+    const uint64_t now{monotonicNowNs()};
     switch (type) {
       case MsgType::OrderAck:
       case MsgType::CancelAck:
@@ -548,7 +548,7 @@ ClientResult runClient(const Options& options, const EncodedShare& share,
 
   const bool paced{rate > 0};
   const uint64_t interval{paced ? 1'000'000'000ull / rate : 0};
-  const uint64_t base{nowNs()};
+  const uint64_t base{monotonicNowNs()};
   uint64_t timed_start{0};
   std::size_t next{0};
   uint64_t last_progress{base};
@@ -557,13 +557,13 @@ ClientResult runClient(const Options& options, const EncodedShare& share,
     // Read first, always. A driver that writes into a socket whose peer is
     // blocked writing back to it deadlocks, and this is the only ordering
     // that cannot.
-    if (client.drain(on_event) > 0) last_progress = nowNs();
+    if (client.drain(on_event) > 0) last_progress = monotonicNowNs();
     if (!client.alive()) {
       result.disconnected = true;
       break;
     }
 
-    const uint64_t now{nowNs()};
+    const uint64_t now{monotonicNowNs()};
     std::size_t bytes_queued{0};
     while (next < share.size() && outstanding.size() < kWindow &&
            bytes_queued < kMaxWriteBytes) {
@@ -599,16 +599,16 @@ ClientResult runClient(const Options& options, const EncodedShare& share,
       result.disconnected = true;
       break;
     }
-    if (bytes_queued > 0) last_progress = nowNs();
+    if (bytes_queued > 0) last_progress = monotonicNowNs();
 
-    if (nowNs() - last_progress > 30'000'000'000ull) {
+    if (monotonicNowNs() - last_progress > 30'000'000'000ull) {
       result.error = std::format("stalled with {} in flight after {} sent",
                                  outstanding.size(), result.sent);
       break;
     }
   }
 
-  const uint64_t end{nowNs()};
+  const uint64_t end{monotonicNowNs()};
   if (timed_start > 0 && end > timed_start) {
     result.elapsed_s = static_cast<double>(end - timed_start) / 1e9;
   }

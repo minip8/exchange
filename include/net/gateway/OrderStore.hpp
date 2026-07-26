@@ -3,9 +3,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
+#include "net/core/Hash.hpp"
+#include "net/core/Ids.hpp"
 #include "net/core/Side.hpp"
 #include "types/OrderBookId.hpp"
 #include "types/OrderId.hpp"
@@ -19,8 +22,8 @@ using Exchange::Types::OrderPrice;
 using Exchange::Types::OrderQuantity;
 
 struct OrderMeta {
-  uint32_t trader_id{};
-  uint32_t session_id{};
+  TraderId trader_id{};
+  SessionId session_id{};
   uint64_t client_order_id{};
   OrderBookId book_id{0};
   OrderPrice price{0};
@@ -36,7 +39,7 @@ struct OrderMeta {
 // Client order ids are unique per session, not globally, so the key is the
 // pair. Cancel-by-coid resolves through this.
 struct SessionCoid {
-  uint32_t session_id{};
+  SessionId session_id{};
   uint64_t client_order_id{};
   bool operator==(const SessionCoid&) const noexcept = default;
 };
@@ -45,12 +48,11 @@ struct SessionCoid {
 template <>
 struct std::hash<Exchange::Net::SessionCoid> {
   size_t operator()(const Exchange::Net::SessionCoid& key) const noexcept {
-    // Two independent 64-bit words folded with the usual odd multiplier.
-    // Client order ids are typically dense per session, so mixing the
-    // session in at a different bit weight keeps buckets spread.
-    const uint64_t a{key.client_order_id};
-    const uint64_t b{static_cast<uint64_t>(key.session_id)};
-    return std::hash<uint64_t>{}(a * 0x9e3779b97f4a7c15ull + b);
+    // Client order ids are typically dense per session, so the coid is the
+    // one scrambled and the session folded in after — mixing them at
+    // different bit weights is what keeps buckets spread. See Hash.hpp.
+    return Exchange::Net::hashCombine(key.client_order_id,
+                                      key.session_id.value);
   }
 };
 
@@ -71,31 +73,47 @@ Lifecycle mirrors the engine exactly:
 
 The aggressor's owner is already carried in the Command and can never be in
 the store at match time, since its order is not in the book yet.
+
+--- Pointer vs. optional, which is a convention across the gateway ---
+
+A raw pointer means BORROWED-OR-ABSENT: it aliases storage this object owns,
+it is invalidated by the next mutation, and returning it copies nothing. That
+is the right shape for find(), which sits on the order path and would
+otherwise copy an OrderMeta on every lookup.
+
+std::optional means OWNED-OR-ABSENT: the value is the caller's, detached from
+this object's storage, and safe to hold across mutations. Every method below
+that hands back state which the call itself may have just erased returns one.
+Those all used to be `bool f(..., T& out)`, which cost the same copy while
+letting a caller read `out` after a false return.
 */
 class OrderStore {
  public:
-  // Returns nullptr if `leaves` is 0 — nothing rested, so nothing is stored.
-  const OrderMeta* insert(OrderId id, const OrderMeta& meta);
+  // Returns false if `leaves` is 0 — nothing rested, so nothing is stored.
+  bool insert(OrderId id, const OrderMeta& meta);
 
+  // Borrowed: invalidated by the next insert/erase/applyFill.
   const OrderMeta* find(OrderId id) const;
 
-  // Applies a fill leg. Returns the new `leaves`, and erases the entry when
-  // it reaches 0. Returns nullopt if the order is not tracked.
   struct FillResult {
-    OrderMeta meta{};  // a copy: the entry may have just been erased
+    OrderMeta meta{};
     OrderQuantity leaves{0};
     bool final{false};
   };
-  bool applyFill(OrderId id, OrderQuantity quantity, FillResult& out);
+
+  // Applies one fill leg. The entry is erased when `leaves` reaches 0, which
+  // is why the result carries a detached copy of the metadata rather than a
+  // pointer to it. nullopt means the order is not tracked here.
+  std::optional<FillResult> applyFill(OrderId id, OrderQuantity quantity);
 
   // Removes and hands back the metadata. Used by cancel and amend.
-  bool erase(OrderId id, OrderMeta& out);
+  std::optional<OrderMeta> erase(OrderId id);
 
-  bool resolveCoid(SessionCoid key, OrderId& out) const;
+  std::optional<OrderId> resolveCoid(SessionCoid key) const;
   bool coidInUse(SessionCoid key) const { return m_by_coid.contains(key); }
 
   // Every live order id belonging to a session, for cancel-on-disconnect.
-  std::vector<OrderId> idsForSession(uint32_t session_id) const;
+  std::vector<OrderId> idsForSession(SessionId session_id) const;
 
   std::size_t size() const noexcept { return m_orders.size(); }
 

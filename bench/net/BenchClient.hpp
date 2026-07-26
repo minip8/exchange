@@ -36,7 +36,19 @@ order acks in 30us if one in a thousand takes 5ms. Sorting a vector<uint64_t>
 needs no dependency and is impossible to get subtly wrong.
 */
 
-inline uint64_t nowNs() {
+/*
+The benchmark's own clock, and deliberately NOT Net::nowNs().
+
+steady_clock, because everything here measures an ELAPSED interval and a
+monotonic clock cannot be stepped backwards by NTP mid-run. Net::nowNs() is a
+system_clock, because it stamps Command::recv_ts_ns — a wall-clock timestamp
+that reaches clients on the wire and is meant to be a real date.
+
+Two different jobs, two different clocks. The explicit name is here because
+the two were previously both called nowNs(), in different namespaces, and
+nothing said which one a call site meant to get.
+*/
+inline uint64_t monotonicNowNs() {
   return static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(
           std::chrono::steady_clock::now().time_since_epoch())

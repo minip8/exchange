@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <type_traits>
 
@@ -92,4 +93,28 @@ static_assert(alignof(Command) == 8);
 static_assert(std::is_trivially_copyable_v<Command>);
 static_assert(sizeof(Command) == kCacheLine,
               "the 64-byte layout assumes a 64-byte line");
+
+/*
+The one wall clock in the system, defined once beside the field it fills.
+
+Both transports stamp `recv_ts_ns` with this as a client's bytes come off the
+socket. It lived as an identical copy in TcpSession.cpp's and
+WebSocketSession.cpp's anonymous namespaces, which left the "only wall clock"
+rule above as a comment rather than as a fact: one of the two quietly changed
+to steady_clock would have made the binary and WebSocket transports stamp
+timestamps that cannot be compared with each other, and nothing would have
+caught it. The field reaches clients as MdPayload::ts_ns and is the basis of
+net_workload_bench's latency numbers, so that divergence would be wrong in two
+places at once.
+
+system_clock, not steady_clock, precisely because this IS the wall clock —
+a browser rendering a trade tape wants a real timestamp. Priority never comes
+from here; it comes from MatchingLoop's monotonic sequence number.
+*/
+inline uint64_t nowNs() noexcept {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+}
 }  // namespace Exchange::Net

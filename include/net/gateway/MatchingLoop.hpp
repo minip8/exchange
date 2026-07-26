@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <unordered_map>
 #include <vector>
@@ -8,7 +9,9 @@
 #include "engine/MatchingEngine.hpp"
 #include "net/core/Command.hpp"
 #include "net/core/Event.hpp"
+#include "net/core/Ids.hpp"
 #include "net/core/RejectCode.hpp"
+#include "net/core/Tuning.hpp"
 #include "net/gateway/BookDirectory.hpp"
 #include "net/gateway/EventSink.hpp"
 #include "net/gateway/MarketDataPublisher.hpp"
@@ -23,8 +26,8 @@ namespace Exchange::Net {
 using Exchange::Engine::MatchingEngine;
 
 struct MatchingLoopConfig {
-  uint32_t default_md_depth{10};
-  uint32_t default_price_scale{2};
+  uint32_t default_md_depth{kDefaultMdDepth};
+  uint32_t default_price_scale{kDefaultPriceScale};
   // Whether an unauthenticated-but-connected session may create books. The
   // gateway has no roles yet; this is the whole of book-admin authorization.
   bool allow_client_book_creation{true};
@@ -75,6 +78,23 @@ backs that rule.
   Command::recv_ts_ns  wall clock, stamped on the I/O thread, for reports
   m_seq -> OrderTime   priority only; zero clock cost, and it satisfies the
                        book's non-decreasing-time invariant by construction
+
+--- Protocol-visible properties worth knowing before reading the handlers ---
+
+Two things here are deliberate and observable from a client, and both would
+look like bugs without this note:
+
+  Amend mints a NEW order id, and priority is always lost — even when the
+  amend only shrinks quantity. See the comment on onAmend.
+
+  A command emits ONE PositionUpdate per (trader, book), not one per fill
+  leg. An aggressor sweeping twenty resting orders gets a single position
+  message carrying the end state, not twenty carrying each intermediate. The
+  intermediates were never wrong, just redundant: addOrder completes the
+  whole match before any leg is reported, so every one of them would have
+  carried the same mark. ExecReports are unaffected — a client reconstructing
+  its position from the exec stream, which is the normal design, sees no
+  difference at all.
 */
 class MatchingLoop {
  public:
@@ -100,8 +120,15 @@ class MatchingLoop {
 
  private:
   struct SessionInfo {
-    uint32_t trader_id{};
+    TraderId trader_id{};
     bool cancel_on_disconnect{false};
+  };
+
+  // The outcome of resolving a Cancel/Amend target. Detached from the store,
+  // because the caller is about to erase the entry it came from.
+  struct ResolvedTarget {
+    OrderId id{0};
+    OrderMeta meta{};
   };
 
   // --- command handlers ---
@@ -121,22 +148,27 @@ class MatchingLoop {
   void reject(const Command&, RejectCode);
   // Private events every one of a trader's sessions should see (fills,
   // positions). Acks go only to the session that asked.
-  void emitToTrader(uint32_t trader_id, const Event& prototype);
-  // `origin_session` is the session that sent the command, or 0 for
+  void emitToTrader(TraderId trader_id, const Event& prototype);
+  // `origin_session` is the session that sent the command, or kNoSession for
   // commands with nobody left to answer (SessionClosed).
-  void flush(uint32_t origin_session);
+  void flush(SessionId origin_session);
 
-  // Applies one fill leg: two exec reports, a trade print, and both
-  // counterparties' position updates.
+  // Applies one fill leg: two exec reports and a trade print. Position
+  // updates are NOT emitted here — they are accumulated in
+  // m_touched_positions and flushed once per command by emitPositions().
   void applyFill(const Command&, const Exchange::Engine::Fill&,
-                 OrderBookId book_id, uint32_t aggressor_trader,
+                 OrderBookId book_id, TraderId aggressor_trader,
                  uint64_t aggressor_coid, uint64_t aggressor_leaves);
-  void emitPosition(uint32_t trader_id, OrderBookId book_id);
+  // Records that this (trader, book) needs a PositionUpdate, deduplicating.
+  void touchPosition(TraderId trader_id, OrderBookId book_id);
+  // Emits one PositionUpdate per (trader, book) touched by this command, then
+  // clears the set. See the protocol note in the class comment.
+  void emitPositions();
   void republish(OrderBookId book_id, uint64_t ts_ns);
 
-  // Resolves a Cancel/Amend target, applying the ownership rule. On failure
-  // it has already emitted the reject.
-  bool resolveTarget(const Command&, OrderId& id, OrderMeta& meta);
+  // Resolves a Cancel/Amend target, applying the ownership rule. nullopt
+  // means it has already emitted the reject.
+  std::optional<ResolvedTarget> resolveTarget(const Command&);
 
   Exchange::Types::OrderTime nextTime();
 
@@ -149,8 +181,8 @@ class MatchingLoop {
   Positions m_positions{};
   MarketDataPublisher m_publisher{};
 
-  std::unordered_map<uint32_t, SessionInfo> m_sessions{};
-  std::unordered_map<uint32_t, std::vector<uint32_t>> m_trader_sessions{};
+  std::unordered_map<SessionId, SessionInfo> m_sessions{};
+  std::unordered_map<TraderId, std::vector<SessionId>> m_trader_sessions{};
 
   // 0 is reserved as the wire sentinel for "no order id".
   uint64_t m_next_order_id{1};
@@ -158,6 +190,22 @@ class MatchingLoop {
   uint64_t m_seq{0};
 
   std::vector<Event> m_out{};
+
+  /*
+  The (trader, book) pairs whose position changed while handling the current
+  command, deduplicated so each gets exactly one PositionUpdate.
+
+  A vector rather than a set: a command touches at most a handful of distinct
+  traders even when it sweeps many levels, and a linear scan over four
+  elements beats hashing every one of them. Cleared by emitPositions(), so it
+  never grows beyond one command's worth.
+  */
+  struct TouchedPosition {
+    TraderId trader_id{};
+    OrderBookId book_id{0};
+    bool operator==(const TouchedPosition&) const noexcept = default;
+  };
+  std::vector<TouchedPosition> m_touched_positions{};
 
 #ifndef NDEBUG
   std::thread::id m_owner_thread{};

@@ -12,7 +12,7 @@ void MarketDataPublisher::registerBook(OrderBookId book_id, uint32_t depth) {
   md.depth = depth == 0 ? 1 : depth;
 }
 
-bool MarketDataPublisher::subscribe(OrderBookId book_id, uint32_t session_id) {
+bool MarketDataPublisher::subscribe(OrderBookId book_id, SessionId session_id) {
   const auto it{m_books.find(book_id)};
   if (it == m_books.end()) return false;
   auto& subscribers{it->second.subscribers};
@@ -24,7 +24,7 @@ bool MarketDataPublisher::subscribe(OrderBookId book_id, uint32_t session_id) {
 }
 
 bool MarketDataPublisher::unsubscribe(OrderBookId book_id,
-                                      uint32_t session_id) {
+                                      SessionId session_id) {
   const auto it{m_books.find(book_id)};
   if (it == m_books.end()) return false;
   auto& subscribers{it->second.subscribers};
@@ -34,7 +34,7 @@ bool MarketDataPublisher::unsubscribe(OrderBookId book_id,
   return true;
 }
 
-void MarketDataPublisher::dropSession(uint32_t session_id) {
+void MarketDataPublisher::dropSession(SessionId session_id) {
   for (auto& [book_id, md] : m_books) {
     const auto removed{std::ranges::remove(md.subscribers, session_id)};
     md.subscribers.erase(removed.begin(), removed.end());
@@ -80,9 +80,9 @@ void MarketDataPublisher::emitLevel(BookMd& md, OrderBookId book_id, Side side,
                                     uint64_t price, uint64_t quantity,
                                     uint64_t ts_ns, std::vector<Event>& out) {
   ++md.md_seq;
-  for (const uint32_t session_id : md.subscribers) {
+  for (const SessionId session_id : md.subscribers) {
     Event event{};
-    event.session_id = session_id;
+    event.session_id = session_id.value;
     event.book_id = static_cast<uint32_t>(book_id.value);
     event.type = EventType::LevelUpdate;
     event.side = side;
@@ -99,8 +99,9 @@ void MarketDataPublisher::emitLevel(BookMd& md, OrderBookId book_id, Side side,
 }
 
 void MarketDataPublisher::emitSnapshot(const OrderBook& book,
-                                       OrderBookId book_id, uint32_t session_id,
-                                       uint32_t trader_id, uint64_t ts_ns,
+                                       OrderBookId book_id,
+                                       SessionId session_id, TraderId trader_id,
+                                       uint64_t ts_ns,
                                        std::vector<Event>& out) {
   const auto it{m_books.find(book_id)};
   if (it == m_books.end()) return;
@@ -113,8 +114,8 @@ void MarketDataPublisher::emitSnapshot(const OrderBook& book,
 
   auto make{[&](EventType type) {
     Event event{};
-    event.session_id = session_id;
-    event.trader_id = trader_id;
+    event.session_id = session_id.value;
+    event.trader_id = trader_id.value;
     event.book_id = static_cast<uint32_t>(book_id.value);
     event.type = type;
     return event;
@@ -174,6 +175,78 @@ void MarketDataPublisher::emitSnapshot(const OrderBook& book,
   md.published_sells = m_scratch_sells;
 }
 
+/*
+Two-pointer merge of the previously published window against the current one.
+
+Both vectors arrive sorted best-first for their side — buys descending, sells
+ascending — because readWindow copies them straight off level vectors the
+engine already keeps in price-priority order. That is what makes a single
+linear walk sufficient where the obvious formulation searches one window for
+each entry of the other.
+
+The three cases are exactly the three ways two sorted sequences can differ:
+
+  same price          a quantity change, or nothing to say at all;
+  current is better   a level that was not visible before — either brand new,
+                      or promoted into view when something above it left;
+  published is better a level that has left the client's view — deleted, or
+                      pushed past the depth boundary by a better one.
+
+The last of those is the case the whole diff-the-window design exists for: it
+is not a "dirty price", nothing about that level changed, and a scheme that
+looked up only touched prices would silently leave it on the client's ladder
+forever.
+
+Note this emits in price order, interleaving departures and arrivals, where
+the previous formulation sent every departure before every arrival. Both are
+valid L2 streams: each message carries its own md_seq, levels are
+independent, and one price cannot both leave and arrive in a single diff
+(equal prices merge into a single update above).
+*/
+void MarketDataPublisher::diffSide(BookMd& md, OrderBookId book_id, Side side,
+                                   const std::vector<MdLevel>& current,
+                                   std::vector<MdLevel>& published,
+                                   uint64_t ts_ns, std::vector<Event>& out) {
+  if (current == published) return;
+
+  if (!md.subscribers.empty()) {
+    // "Better" is side-relative: the best buy is the highest price, the best
+    // sell the lowest. This is the same ordering the level vectors are in.
+    const auto better{[side](uint64_t lhs, uint64_t rhs) noexcept {
+      return side == Side::Buy ? lhs > rhs : lhs < rhs;
+    }};
+
+    std::size_t i{0};
+    std::size_t j{0};
+    while (i < current.size() && j < published.size()) {
+      if (current[i].price == published[j].price) {
+        if (current[i].quantity != published[j].quantity) {
+          emitLevel(md, book_id, side, current[i].price, current[i].quantity,
+                    ts_ns, out);
+        }
+        ++i;
+        ++j;
+      } else if (better(current[i].price, published[j].price)) {
+        emitLevel(md, book_id, side, current[i].price, current[i].quantity,
+                  ts_ns, out);
+        ++i;
+      } else {
+        emitLevel(md, book_id, side, published[j].price, 0, ts_ns, out);
+        ++j;
+      }
+    }
+    for (; i < current.size(); ++i) {
+      emitLevel(md, book_id, side, current[i].price, current[i].quantity, ts_ns,
+                out);
+    }
+    for (; j < published.size(); ++j) {
+      emitLevel(md, book_id, side, published[j].price, 0, ts_ns, out);
+    }
+  }
+
+  published = current;
+}
+
 void MarketDataPublisher::publishDeltas(const OrderBook& book,
                                         OrderBookId book_id, uint64_t ts_ns,
                                         std::vector<Event>& out) {
@@ -184,34 +257,10 @@ void MarketDataPublisher::publishDeltas(const OrderBook& book,
   readWindow(book.buys(), md.depth, m_scratch_buys);
   readWindow(book.sells(), md.depth, m_scratch_sells);
 
-  auto diff{[&](const std::vector<MdLevel>& current,
-                std::vector<MdLevel>& published, Side side) {
-    if (current == published) return;
-    if (!md.subscribers.empty()) {
-      // Anything that was visible and is no longer — either deleted outright
-      // or pushed past the depth boundary by a better level — must be sent
-      // as quantity 0, or the client's ladder keeps a level that is not
-      // there. This is the case a per-dirty-price scheme silently misses.
-      for (const MdLevel& was : published) {
-        const auto still{
-            std::ranges::find(current, was.price, &MdLevel::price)};
-        if (still == current.end()) {
-          emitLevel(md, book_id, side, was.price, 0, ts_ns, out);
-        }
-      }
-      for (const MdLevel& now : current) {
-        const auto before{
-            std::ranges::find(published, now.price, &MdLevel::price)};
-        if (before == published.end() || before->quantity != now.quantity) {
-          emitLevel(md, book_id, side, now.price, now.quantity, ts_ns, out);
-        }
-      }
-    }
-    published = current;
-  }};
-
-  diff(m_scratch_buys, md.published_buys, Side::Buy);
-  diff(m_scratch_sells, md.published_sells, Side::Sell);
+  diffSide(md, book_id, Side::Buy, m_scratch_buys, md.published_buys, ts_ns,
+           out);
+  diffSide(md, book_id, Side::Sell, m_scratch_sells, md.published_sells, ts_ns,
+           out);
 }
 
 void MarketDataPublisher::publishTrade(OrderBookId book_id, uint64_t price,
@@ -226,9 +275,9 @@ void MarketDataPublisher::publishTrade(OrderBookId book_id, uint64_t price,
   if (md.subscribers.empty()) return;
 
   ++md.md_seq;
-  for (const uint32_t session_id : md.subscribers) {
+  for (const SessionId session_id : md.subscribers) {
     Event event{};
-    event.session_id = session_id;
+    event.session_id = session_id.value;
     event.book_id = static_cast<uint32_t>(book_id.value);
     event.type = EventType::TradePrint;
     event.side = aggressor_side;
@@ -244,30 +293,23 @@ void MarketDataPublisher::publishTrade(OrderBookId book_id, uint64_t price,
   }
 }
 
-bool MarketDataPublisher::mark(const OrderBook& book, OrderBookId book_id,
-                               int64_t& out) const {
+std::optional<int64_t> MarketDataPublisher::mark(const OrderBook& book,
+                                                 OrderBookId book_id) const {
   // front() is the best level: buys are sorted descending, sells ascending,
   // and empty levels are erased rather than left behind.
   const auto buys{book.buys()};
   const auto sells{book.sells()};
   if (!buys.empty() && !sells.empty()) {
-    out = static_cast<int64_t>(
+    return static_cast<int64_t>(
         (buys.front().price.value + sells.front().price.value) / 2);
-    return true;
   }
-  if (!buys.empty()) {
-    out = static_cast<int64_t>(buys.front().price.value);
-    return true;
-  }
-  if (!sells.empty()) {
-    out = static_cast<int64_t>(sells.front().price.value);
-    return true;
-  }
+  if (!buys.empty()) return static_cast<int64_t>(buys.front().price.value);
+  if (!sells.empty()) return static_cast<int64_t>(sells.front().price.value);
+
   const auto it{m_books.find(book_id)};
   if (it != m_books.end() && it->second.has_traded) {
-    out = static_cast<int64_t>(it->second.last_trade_price);
-    return true;
+    return static_cast<int64_t>(it->second.last_trade_price);
   }
-  return false;
+  return std::nullopt;
 }
 }  // namespace Exchange::Net

@@ -4,6 +4,8 @@
 #include <functional>
 #include <unordered_map>
 
+#include "net/core/Hash.hpp"
+#include "net/core/Ids.hpp"
 #include "net/core/Side.hpp"
 #include "types/OrderBookId.hpp"
 
@@ -21,7 +23,7 @@ struct Position {
 };
 
 struct TraderBook {
-  uint32_t trader_id{};
+  TraderId trader_id{};
   uint64_t book_id{};
   bool operator==(const TraderBook&) const noexcept = default;
 };
@@ -30,8 +32,9 @@ struct TraderBook {
 template <>
 struct std::hash<Exchange::Net::TraderBook> {
   size_t operator()(const Exchange::Net::TraderBook& key) const noexcept {
-    return std::hash<uint64_t>{}(key.book_id * 0x9e3779b97f4a7c15ull +
-                                 key.trader_id);
+    // Book ids range wider than trader ids, so the book is the one scrambled
+    // and the trader folded in after. See Hash.hpp.
+    return Exchange::Net::hashCombine(key.book_id, key.trader_id.value);
   }
 };
 
@@ -53,14 +56,15 @@ class Positions {
  public:
   // Applies one fill leg from this trader's point of view and returns the
   // updated position.
-  const Position& applyFill(uint32_t trader_id, OrderBookId book_id, Side side,
+  const Position& applyFill(TraderId trader_id, OrderBookId book_id, Side side,
                             uint64_t price, uint64_t quantity);
 
   // Re-marks against the current mid. Returns false if the trader holds no
   // position in that book (nothing to re-mark).
-  bool mark(uint32_t trader_id, OrderBookId book_id, int64_t mark_price);
+  bool mark(TraderId trader_id, OrderBookId book_id, int64_t mark_price);
 
-  const Position* find(uint32_t trader_id, OrderBookId book_id) const;
+  // Borrowed: invalidated by the next applyFill. See OrderStore.hpp.
+  const Position* find(TraderId trader_id, OrderBookId book_id) const;
 
  private:
   std::unordered_map<TraderBook, Position> m_positions{};

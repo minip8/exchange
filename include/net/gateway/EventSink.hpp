@@ -23,6 +23,31 @@ Backpressure policy lives in the implementation, not here, because the
 correct answer differs per stream — a dropped exec report desynchronizes a
 client's position and warrants a disconnect, while a dropped level update is
 recoverable by resnapshot. See ThreadedEventSink.
+
+--- Why this stays virtual, rather than becoming CRTP ---
+
+The obvious objection to a virtual call in a hot path does not apply here,
+because of where the call actually sits. MatchingLoop accumulates a whole
+command's output into m_out and publishes ONCE, so this is one indirect call
+per COMMAND, not per event — amortized over a batch that already did hash
+lookups, engine matching and a ring push. It does not show up.
+
+Templating the loop on its sink to remove it would cost real things:
+
+  - MatchingLoop becomes a template, so MatchingThread does too, and both
+    move into headers.
+  - ServerConfig::egress selects "ring" or "post" at RUNTIME, and net_smoke
+    uses VectorEventSink, so all three instantiations would have to exist —
+    three copies of the entire matching loop, competing for icache, for a
+    call that costs nothing.
+  - The seam above, which is the most valuable testability property in this
+    layer, would survive only as a concept rather than as something the build
+    graph enforces.
+
+The dispatch count is already minimal. The only way to reduce it further
+would be to publish across several commands at once, which would break both
+kEndOfBatch's per-command meaning and the guarantee that a batch is small
+enough for the egress ring to accept whole.
 */
 class EventSink {
  public:

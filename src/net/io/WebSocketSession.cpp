@@ -1,21 +1,11 @@
 #include "net/io/WebSocketSession.hpp"
 
 #include <boost/beast/core/bind_handler.hpp>
-#include <chrono>
 
 #include "net/io/Log.hpp"
 #include "net/wire/JsonProtocol.hpp"
 
 namespace Exchange::Net {
-namespace {
-uint64_t nowNs() {
-  return static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::system_clock::now().time_since_epoch())
-          .count());
-}
-}  // namespace
-
 WebSocketSession::WebSocketSession(tcp::socket socket, SessionContext context,
                                    uint32_t session_id)
     : m_stream(std::move(socket)),

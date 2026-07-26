@@ -36,6 +36,19 @@ Note what this implies: an oversized batch is not simply rejected. It is
 re-tried event by event so that the private messages in it still land and
 only the market-data ones are sacrificed — which is the whole point of
 distinguishing them.
+
+--- The uniform fast path ---
+
+A batch is one command's output, and its events almost always route to a
+single I/O thread. At the default of one I/O thread that is EVERY batch, at
+which point bucketing copies all 64 bytes of every event into a vector purely
+to copy it straight back out into the ring.
+
+So publish() first checks whether the whole span shares a destination, and if
+it does, pushes the span itself. The check is one pass over data already in
+L1 and the win is one full copy per event on the overwhelmingly common path.
+The bucketing path remains for genuinely mixed batches, which is what
+market-data fan-out across several I/O threads produces.
 */
 class RingEgressSink final : public EventSink {
  public:
@@ -53,6 +66,11 @@ class RingEgressSink final : public EventSink {
     return type == EventType::SnapshotBegin || type == EventType::LevelUpdate ||
            type == EventType::SnapshotEnd || type == EventType::TradePrint;
   }
+
+  // The per-stream backpressure policy, applied event by event to a run the
+  // ring would not take whole. Shared by both the fast and bucketed paths so
+  // there is exactly one place the policy is written down.
+  void applyOverflowPolicy(EgressQueue& queue, std::span<const Event> events);
 
   std::vector<std::unique_ptr<IoThread>>& m_threads;
   // Reused across calls; publish only ever runs on the matching thread, so

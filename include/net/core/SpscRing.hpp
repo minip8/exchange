@@ -160,13 +160,6 @@ class SpscRing {
   char m_tail_pad[kCacheLine]{};
 };
 
-/*
-Ring sizes live here so the benchmark can sweep them from one place.
-
-Ingress is smaller than egress on purpose: one command can produce many
-events (a snapshot is 1 + N + 1 of them), so the egress side needs the
-bigger cushion.
-*/
-inline constexpr std::size_t kIngressRingCapacity{2048};
-inline constexpr std::size_t kEgressRingCapacity{4096};
+// The capacities this exchange instantiates the ring at live in
+// net/core/Tuning.hpp. They are the application's sizes, not the queue's.
 }  // namespace Exchange::Net

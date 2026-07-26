@@ -65,14 +65,51 @@ marks the boundary rather than making the I/O thread infer it.
 inline constexpr uint8_t kCommandComplete{1u << 3};
 }  // namespace EventFlags
 
-// One leg of a fill, reported privately to one of the two owners.
+/*
+One leg of a fill, reported privately to one of the two owners.
+
+--- What a "leg" is ---
+
+An incoming order does not match "an order", it sweeps as much of the opposite
+side as its price allows. Each resting order it consumes on the way is one
+LEG. So a buy for 300 that crosses three resting sells of 100 produces three
+legs, and every leg is reported to BOTH of its owners — the aggressor and that
+particular resting counterparty — so the command emits six ExecReports with
+six distinct exec_ids. There is no single "the fill" event, which is why the
+client's dedup key is per leg rather than per order.
+
+--- What "leaves" is ---
+
+FIX's LeavesQty: how much of THIS owner's order is still open after THIS leg.
+It is the field that makes the gateway, not the engine, the authority on order
+state — the engine consumes an Order and hands back only fills, so nothing
+else in the process knows how much of an order is left. See OrderStore.
+
+The two reports of a single leg carry different leaves, which is the whole
+reason it is per-owner. Continuing the example, with the aggressor's 300
+against three resting 100s:
+
+  leg 1   aggressor leaves 200   resting #1 leaves 0  (kFinal)
+  leg 2   aggressor leaves 100   resting #2 leaves 0  (kFinal)
+  leg 3   aggressor leaves 0     resting #3 leaves 0  (kFinal)
+          (kFinal)
+
+Had the third resting order been for 250, leg 3 would fill 100 of it and read
+`aggressor leaves 0, resting #3 leaves 150` — the resting side stays open and
+keeps its entry in the store.
+
+`quantity` is that leg alone and never a running total; a client wanting
+cumulative filled quantity computes original - leaves. `price` is always the
+RESTING order's price, because that is the one that was on the book first and
+therefore set the terms of the trade.
+*/
 struct ExecPayload {
   uint64_t exec_id;  // unique per leg; the client's dedup key
   uint64_t order_id;
   uint64_t client_order_id;
   uint64_t price;     // always the RESTING order's price
   uint64_t quantity;  // this leg only, not cumulative
-  uint64_t leaves;    // remaining on this owner's order after the leg
+  uint64_t leaves;    // remaining on THIS owner's order after this leg
 };
 static_assert(sizeof(ExecPayload) == 48);
 
@@ -141,6 +178,32 @@ design: since Event is fixed-size, a snapshot is NOT one event. It is
 SnapshotBegin + N x LevelUpdate + SnapshotEnd published in a single
 tryPushBatch. That is how real feeds work, and it means there is no
 variable-length cross-thread ownership contract to get wrong.
+
+--- Why the payloads carry explicit pad[] members and not alignas ---
+
+This looks like something alignas should express, and it is not. alignas
+constrains where an object starts; it says nothing about TAIL padding, which
+the compiler would still insert to round each 48-byte arm out. The difference
+is what those bytes contain: padding the compiler inserts is INDETERMINATE,
+while a `uint8_t pad[N]` member named in a designated initializer is zeroed
+like any other field.
+
+Three things here depend on that being zero rather than indeterminate:
+
+  - net_smoke encodes the same content through the binary and JSON codecs and
+    compares the resulting Command/Event with memcmp over the whole object.
+    That is the anti-drift test between the two protocols, and indeterminate
+    padding would make byte-identical messages compare unequal at random.
+  - Event is memcpy'd into the egress ring and, for the binary protocol, its
+    fields onto a socket. Indeterminate bytes are stack or heap residue, so
+    this would be an information leak to clients as well as a bug.
+  - The union means the arms not being written are dead storage; `payload{.raw
+    = {}}` is what makes an Event constructed today byte-identical to the same
+    Event constructed tomorrow, which is what the determinism claim in
+    MatchingLoop.hpp rests on.
+
+So the pads stay, and they stay explicit, because that is the only form that
+is both reviewable and guaranteed zero.
 */
 struct Event {
   uint32_t session_id{};

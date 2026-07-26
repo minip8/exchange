@@ -678,7 +678,7 @@ void testPositions() {
   const uint64_t book{bootstrap(harness)};
 
   auto positionOf{[&](uint32_t trader) {
-    return harness.loop.positions().find(trader,
+    return harness.loop.positions().find(TraderId{trader},
                                          Exchange::Types::OrderBookId{book});
   }};
 
@@ -706,6 +706,75 @@ void testPositions() {
         "buying at 50 and selling at 60 realizes +1000");
   check(a != nullptr && a->unrealizedPnl() == 0,
         "a flat position has no unrealized P&L");
+}
+
+/*
+A command emits ONE PositionUpdate per (trader, book), not one per fill leg.
+
+This is protocol-visible and therefore worth pinning: an aggressor that
+sweeps three resting orders used to receive three position messages carrying
+each intermediate running total. They were never wrong — addOrder completes
+the whole match before any leg is reported, so all three carried the same
+mark — merely redundant. The arithmetic is still per leg; only the reporting
+collapsed, which is what the final-value checks below are here to prove.
+*/
+void testPositionUpdatesCollapse() {
+  Harness harness{};
+  const uint64_t book{bootstrap(harness)};
+
+  // Three resting sells from A, all of which one buy from B will consume.
+  harness.run(newOrder(kSessionA, kTraderA, book, Side::Sell, 50, 100, 1));
+  harness.run(newOrder(kSessionA, kTraderA, book, Side::Sell, 51, 100, 2));
+  harness.run(newOrder(kSessionA, kTraderA, book, Side::Sell, 52, 100, 3));
+
+  const std::size_t mark{harness.mark()};
+  harness.run(newOrder(kSessionB, kTraderB, book, Side::Buy, 52, 300, 4));
+  const std::vector<Event> events{harness.since(mark)};
+
+  check(countOf(events, EventType::ExecReport) == 6,
+        "three legs report to both owners: six exec reports");
+
+  std::size_t to_a{0};
+  std::size_t to_b{0};
+  for (const Event& event : events) {
+    if (event.type != EventType::PositionUpdate) continue;
+    if (event.session_id == kSessionA) ++to_a;
+    if (event.session_id == kSessionB) ++to_b;
+  }
+  check(to_a == 1, "the swept maker gets one position update, not three");
+  check(to_b == 1, "the sweeping taker gets one position update, not three");
+
+  // The collapse must not cost accuracy: the surviving updates carry the end
+  // state, not an interim. The aggressor's comes first, because applyFill
+  // touches the taker before the maker on each leg.
+  std::optional<Event> taker{};
+  std::optional<Event> maker{};
+  for (const Event& event : events) {
+    if (event.type != EventType::PositionUpdate) continue;
+    if (event.session_id == kSessionB && !taker.has_value()) taker = event;
+    if (event.session_id == kSessionA && !maker.has_value()) maker = event;
+  }
+  check(taker.has_value() && taker->payload.pos.net_quantity == 300,
+        "the taker's single update carries the final +300, not an interim");
+  check(maker.has_value() && maker->payload.pos.net_quantity == -300,
+        "the maker's single update carries the final -300, not an interim");
+
+  /*
+  avg_cost is 50, and the true weighted average of 100@50, 100@51 and 100@52
+  is 51. The gap is not the collapse — the arithmetic still runs per leg and
+  is unchanged — it is Positions::applyFill re-averaging with integer
+  division at every step, so each leg truncates against an already-truncated
+  figure: 5000/100 = 50, then 10100/200 = 50, then 15200/300 = 50.
+
+  Pinned rather than corrected because it is pre-existing and changing it
+  would move realized P&L for every multi-leg fill. It is worth knowing that
+  avg_cost drifts LOW on a sweep, and therefore that unrealized P&L on a long
+  reads slightly high.
+  */
+  const Position* b{harness.loop.positions().find(
+      TraderId{kTraderB}, Exchange::Types::OrderBookId{book})};
+  check(b != nullptr && b->net_quantity == 300 && b->avg_cost == 50,
+        "the taker is long 300, avg_cost truncated to 50 (true mean 51)");
 }
 
 void testDisconnect() {
@@ -1544,6 +1613,7 @@ int main() {
   testIocAndMarketOrders();
   testMarketData();
   testPositions();
+  testPositionUpdatesCollapse();
   testDisconnect();
   testDeterminism();
 

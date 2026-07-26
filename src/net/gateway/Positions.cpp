@@ -13,7 +13,7 @@ int64_t absValue(int64_t v) noexcept { return v < 0 ? -v : v; }
 __extension__ typedef __int128 Int128;
 }  // namespace
 
-const Position& Positions::applyFill(uint32_t trader_id, OrderBookId book_id,
+const Position& Positions::applyFill(TraderId trader_id, OrderBookId book_id,
                                      Side side, uint64_t price,
                                      uint64_t quantity) {
   Position& position{m_positions[TraderBook{trader_id, book_id.value}]};
@@ -65,7 +65,7 @@ const Position& Positions::applyFill(uint32_t trader_id, OrderBookId book_id,
   return position;
 }
 
-bool Positions::mark(uint32_t trader_id, OrderBookId book_id,
+bool Positions::mark(TraderId trader_id, OrderBookId book_id,
                      int64_t mark_price) {
   const auto it{m_positions.find(TraderBook{trader_id, book_id.value})};
   if (it == m_positions.end()) return false;
@@ -73,7 +73,7 @@ bool Positions::mark(uint32_t trader_id, OrderBookId book_id,
   return true;
 }
 
-const Position* Positions::find(uint32_t trader_id, OrderBookId book_id) const {
+const Position* Positions::find(TraderId trader_id, OrderBookId book_id) const {
   const auto it{m_positions.find(TraderBook{trader_id, book_id.value})};
   return it == m_positions.end() ? nullptr : &it->second;
 }

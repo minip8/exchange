@@ -11,6 +11,7 @@
 #include "net/core/Command.hpp"
 #include "net/core/Event.hpp"
 #include "net/core/SpscRing.hpp"
+#include "net/core/Tuning.hpp"
 #include "net/io/EgressQueue.hpp"
 #include "net/io/SessionTable.hpp"
 #include "net/io/TraderDirectory.hpp"

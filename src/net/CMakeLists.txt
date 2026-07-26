@@ -18,6 +18,17 @@ find_package(Threads REQUIRED)
 
 # ---------------------------------------------------------------------------
 # net_protocol — header-only core + wire. No Boost, no threads, no engine.
+#
+# INTERFACE, and therefore header-only, on purpose: net_smoke can fuzz the
+# frame parser with nothing linked at all. That is also the answer to "why is
+# there no src/net/core to match include/net/core" — the contents are POD
+# structs with static_asserts, constexpr conversions and a template, none of
+# which CAN live in a .cpp.
+#
+# The one exception is RejectCode::toString, which is a string table and does
+# need a translation unit. It lives at src/net/core/RejectCode.cpp, beside the
+# header it implements, but is compiled into net_gateway below, because an
+# INTERFACE target cannot carry an object file.
 # ---------------------------------------------------------------------------
 add_library(net_protocol INTERFACE)
 target_include_directories(net_protocol INTERFACE
@@ -46,13 +57,15 @@ target_compile_definitions(net_boost INTERFACE
 # with no sockets and no threads, which is what makes net_smoke a real test.
 # ---------------------------------------------------------------------------
 add_library(net_gateway STATIC
+    # net_protocol is INTERFACE and cannot carry an object, so core's one
+    # non-header symbol rides here. See the note on net_protocol above.
+    core/RejectCode.cpp
     gateway/BookDirectory.cpp
     gateway/MarketDataPublisher.cpp
     gateway/MatchingLoop.cpp
     gateway/MatchingThread.cpp
     gateway/OrderStore.cpp
     gateway/Positions.cpp
-    gateway/RejectCode.cpp
     # The binary codec lives here, not in net_io: it needs nothing but
     # memcpy, and keeping it Boost-free is what lets net_smoke fuzz the
     # frame parser without linking Asio. The JSON codec, which does need

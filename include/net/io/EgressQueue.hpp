@@ -9,6 +9,7 @@
 
 #include "net/core/Event.hpp"
 #include "net/core/SpscRing.hpp"
+#include "net/core/Tuning.hpp"
 
 namespace Exchange::Net {
 namespace asio = boost::asio;
