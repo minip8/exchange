@@ -2,6 +2,10 @@
 
 ## Benchmarks (OrderBook)
 
+Here are some features/changes at each stage of the project for bookkeeping.
+
+Will include the appropriate plot(s) eventually. :)
+
 ### 612785f
 
 The simplest approach - store all `Order`s in a `std::vector`, with the exception of mapping `OrderId`s to their respective `Buy` and `Sell` sides.
@@ -18,7 +22,7 @@ Delete `PriceLevel`s that are empty.
 
 Replace `std::function_ref match_predicate` with inlined lambdas by templating `match` on `OrderSide`.
 
-## Networking
+## Networking (feat. Claude)
 
 The engine is a pure in-process library; `exchange_server` is the networked
 front end around it. Two protocols over one core: a custom binary TCP
