@@ -118,7 +118,8 @@ Recoverable failures use `std::expected<T, EngineError>` (never exceptions). `En
 | `net_boost` | INTERFACE | `Boost::headers`, Threads, separate-compilation defines |
 | `net_gateway` | STATIC | `engine` + `net_protocol` + Threads. **Deliberately no Boost** — the matching-thread logic must stay exercisable with no sockets. The binary codec lives here for the same reason. |
 | `net_io` | STATIC | sockets, sessions, listeners, the JSON codec, `boost_impl.cpp` |
-| `exchange_server`, `exchange_cli`, `net_smoke`, `net_loopback_bench` | EXE | |
+| `exchange_server`, `exchange_cli`, `net_smoke` | EXE | |
+| `net_loopback_bench`, `net_workload_bench` | EXE | Release only, `EXCLUDE_FROM_ALL`. See "Network benchmark pipeline". |
 
 Nothing is SHARED, so the non-PIC `engine` never becomes a problem. `net_io` links `engine` **normally** and inherits its sanitizers — do NOT copy the flash1 adapter's compile-`OrderBook.cpp`-directly trick here, which would mismatch `std::vector<Fill>` layouts across the `_GLIBCXX_DEBUG` boundary.
 
@@ -196,7 +197,32 @@ exchange_cli --load 8 --rate 50000 --book N --seconds 60   # multi-thread gate
 
 `net_smoke` must pass under **both** the `debug` and `tsan` trees; that pair substitutes for a unit-test suite. `scripts/net_e2e.sh` is the market-data gate: `exchange_cli --tail --verify` rebuilds the book from a snapshot plus deltas and compares it against a fresh snapshot.
 
-`net_loopback_bench` (Release only, `cmake --build --preset loopback-bench`) reports p50/p99/p99.9 for the gateway alone and for a full TCP round trip, across three pipeline depths and both egress implementations. Measured result: the lock-free egress and `asio::post` are indistinguishable at depth 1, reach parity around depth 8, and the ring pulls ~8-10% ahead on median and throughput by depth 32 where one eventfd wake carries ~40 events. At this project's real load it buys nothing measurable — which is what the design predicted and what the benchmark exists to check rather than assume.
+`net_loopback_bench` (Release only, `cmake --build --preset loopback-bench`) reports p50/p99/p99.9 for the gateway alone and for a full TCP round trip, across three pipeline depths and both egress implementations. Measured result: the lock-free egress and `asio::post` are indistinguishable at depth 1, reach parity around depth 8, and the ring pulls ~8-10% ahead on median and throughput by depth 32 where one eventfd wake carries ~40 events. At this project's real load it buys nothing measurable — which is what the design predicted and what the benchmark exists to check rather than assume. `--json PATH` writes the same numbers machine-readably; stdout is unchanged either way.
+
+### Network benchmark pipeline
+
+`net_workload_bench` (`bench/net/`, Release only, `cmake --build --preset net-bench`) replays the **flash1 order stream** through the networking layer, so the network numbers sit on the same axis as the engine numbers — same five volatility regimes, same messages, no second synthetic workload to keep honest. `scripts/net_bench_pipeline.sh` is the `bench_pipeline.sh` equivalent: run, record to `bench/results/net/run_<ts>_<sha>.json`, plot to `bench/results/net/plots/`.
+
+```bash
+scripts/net_bench_pipeline.sh                 # quick: 200k-order stream, all five scenarios
+scripts/net_bench_pipeline.sh --full          # the canonical 1M-order stream, wider rate sweep
+scripts/net_bench_pipeline.sh --scenario normal
+scripts/net_bench_pipeline.sh --plot-only
+```
+
+The stream is **not** internal to the harness binary: `./generator` writes `orders_<scenario>_s<seed>_n<count>.bin` and the harness only shells out when it is missing, so `bench/net/Flash1Workload.hpp` reads the same files. It redeclares the 40-byte record rather than including a harness header, so the target builds with or without `external/` — only *running* needs it.
+
+Two modes. `gateway` drives `Command`s straight through `MatchingLoop` with no sockets, and the gap between it and the flash1 harness's own M msgs/s is the price of the gateway's ownership, `leaves` and market data. `tcp` is open-loop: sends are paced at a target offered rate and **the latency clock starts at the scheduled send time, not the actual one**, so a driver that falls behind puts its own backlog in the number. That is the whole point — a closed-loop measurement cannot show a knee.
+
+Three things are load-bearing and easy to get wrong:
+
+- **Prices use the same sign-bit flip as `bench/flash1/adapter.cpp`.** That is what makes a tick land on the same `OrderPrice` on both paths. If the two ever diverge the scenarios stop being comparable.
+- **Cancel and amend send `order_id = 0`**, resolving through `client_order_id` (`MatchingLoop::resolveTarget`), so the client replays generator-assigned ids without learning exchange-minted ones.
+- **Acks are matched to commands in FIFO order, not by client order id.** The generator emits each order's cancel immediately after its new — the median gap is *one message* — so at any pipeline depth above 1 both are outstanding at once carrying the same coid, and a table keyed on it collides on roughly half of all messages. FIFO is exact: the session is pinned, commands are handled in ring order, egress preserves order. The coid on each ack is then a consistency check, and any mismatch is counted as `desync` and **fails the run**. The one command answering with two ack-family events is an IOC leaving a residual (`OrderAck` then `CancelAck`); it is recognised by coid and skipped.
+
+What is deliberately *not* reproduced: `OrderTime` comes from `m_seq` rather than the workload's `seq` (same total order, so FIFO priority is preserved), and amend mints a new order id. There is no correctness hash here — correctness stays with `scripts/run_flash1.sh audit`. This gates instead on the reject counts: the generator plants ~2% duplicate cancels and stale modifies, so **zero `UnknownOrder` rejects means the stream did not really replay**, and a flood means the run found a fast failure path.
+
+Reading the plots: `net_latency_vs_rate.png` is the one that matters — p50/p99/p99.9 against offered load, with saturation marked. The p50 and p99 curves are the signal; the p99.9 tail is noisy on a loaded desktop (three hot threads with `--spin-us 200`), so a non-monotonic p99.9 between two paced points is scheduler noise, not a knee.
 
 **Phases 0-6 must not touch** `OrderBook.hpp`, `Order.hpp`, `PriceLevel.hpp` or `Symbol.hpp` — the flash1 harness compiles against them. Every engine change gets `scripts/run_flash1.sh audit` on all five scenarios before merge.
 
