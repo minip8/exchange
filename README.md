@@ -1,5 +1,24 @@
 # cpp-exchange
 
+A limit-order-book matching engine in C++26, plus a networked front end around
+it.
+
+## Docs
+
+- **[docs/BUILDING.md](docs/BUILDING.md)** — prerequisites, the three build
+  trees (`debug` / `tsan` / `release`), every preset, and where binaries land.
+- **[docs/RUNNING.md](docs/RUNNING.md)** — the server, the CLI, the browser GUI,
+  and the four checks that stand in for a unit-test suite.
+- **[docs/BENCHMARKING.md](docs/BENCHMARKING.md)** — Google Benchmark, the
+  flash1 conformance harness, the network benches, and how to read the numbers.
+
+```bash
+cmake --preset debug && cmake --build --preset debug     # develop here
+cmake --preset release && cmake --build --preset release # benchmark here
+```
+
+`CLAUDE.md` has the architecture and design rationale.
+
 ## Benchmarks (OrderBook)
 
 Here are some features/changes at each stage of the project for bookkeeping.
