@@ -6,6 +6,9 @@
 if(TARGET net_io)
   add_executable(net_loopback_bench EXCLUDE_FROM_ALL net_loopback_bench.cpp)
   target_link_libraries(net_loopback_bench PRIVATE net_io)
+  # BenchClient.hpp, shared with net_workload_bench.
+  target_include_directories(net_loopback_bench PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../net)
   target_compile_options(net_loopback_bench PRIVATE -O3)
 else()
   message(STATUS

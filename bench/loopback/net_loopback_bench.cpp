@@ -24,13 +24,10 @@ Debug build of this is sanitized and its numbers are meaningless.
     cmake --build --preset loopback-bench
     ./build/release/bench/loopback/net_loopback_bench
 */
-#include <algorithm>
 #include <boost/asio/connect.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
-#include <boost/asio/write.hpp>
-#include <chrono>
-#include <cstring>
+#include <cstdio>
 #include <format>
 #include <print>
 #include <string>
@@ -38,6 +35,7 @@ Debug build of this is sanitized and its numbers are meaningless.
 #include <thread>
 #include <vector>
 
+#include "BenchClient.hpp"
 #include "net/gateway/EventSink.hpp"
 #include "net/gateway/MatchingLoop.hpp"
 #include "net/io/Server.hpp"
@@ -47,53 +45,13 @@ Debug build of this is sanitized and its numbers are meaningless.
 namespace asio = boost::asio;
 using tcp = asio::ip::tcp;
 using namespace Exchange::Net;
+// nowNs, Percentiles, percentilesOf, report and BenchClient live in
+// bench/net/BenchClient.hpp — shared with net_workload_bench so the two
+// benchmarks cannot drift on how a percentile or a frame boundary is computed.
+using namespace Exchange::Bench;
 namespace Wire = Exchange::Net::Binary;
 
 namespace {
-
-uint64_t nowNs() {
-  return static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::steady_clock::now().time_since_epoch())
-          .count());
-}
-
-struct Percentiles {
-  uint64_t p50{};
-  uint64_t p99{};
-  uint64_t p999{};
-  uint64_t max{};
-  double mean{};
-};
-
-// Takes the sample by value: sorting is destructive and the caller almost
-// always wants its vector back untouched for a second measurement.
-Percentiles percentilesOf(std::vector<uint64_t> samples) {
-  if (samples.empty()) return {};
-  std::ranges::sort(samples);
-  auto at{[&](double quantile) {
-    const auto index{static_cast<std::size_t>(
-        quantile * static_cast<double>(samples.size() - 1))};
-    return samples[index];
-  }};
-  double total{0};
-  for (const uint64_t sample : samples) total += static_cast<double>(sample);
-  return Percentiles{.p50 = at(0.50),
-                     .p99 = at(0.99),
-                     .p999 = at(0.999),
-                     .max = samples.back(),
-                     .mean = total / static_cast<double>(samples.size())};
-}
-
-void report(std::string_view label, const std::vector<uint64_t>& samples) {
-  const Percentiles p{percentilesOf(samples)};
-  std::println(
-      "{:<22} n={:<8} p50={:>8.2f}us p99={:>8.2f}us "
-      "p99.9={:>9.2f}us max={:>9.2f}us mean={:>8.2f}us",
-      label, samples.size(), static_cast<double>(p.p50) / 1000.0,
-      static_cast<double>(p.p99) / 1000.0, static_cast<double>(p.p999) / 1000.0,
-      static_cast<double>(p.max) / 1000.0, p.mean / 1000.0);
-}
 
 // ---------------------------------------------------------------------------
 // gateway-only: the floor
@@ -110,7 +68,12 @@ class CountingSink final : public EventSink {
   std::size_t m_count{0};
 };
 
-void benchGateway(std::size_t iterations) {
+struct GatewayResult {
+  Percentiles resting{};
+  Percentiles crossing{};
+};
+
+GatewayResult benchGateway(std::size_t iterations) {
   CountingSink sink{};
   MatchingLoop loop{sink};
 
@@ -158,71 +121,13 @@ void benchGateway(std::size_t iterations) {
     crossing.push_back(nowNs() - start);
   }
 
-  report("gateway rest", resting);
-  report("gateway cross", crossing);
+  return GatewayResult{.resting = report("gateway rest", resting),
+                       .crossing = report("gateway cross", crossing)};
 }
 
 // ---------------------------------------------------------------------------
 // full TCP round trip
 // ---------------------------------------------------------------------------
-
-class BenchClient {
- public:
-  explicit BenchClient(asio::io_context& io) : m_socket(io) {}
-
-  bool connect(uint16_t port, std::string_view key) {
-    boost::system::error_code ec{};
-    m_socket.connect(tcp::endpoint{asio::ip::make_address("127.0.0.1"), port},
-                     ec);
-    if (ec) return false;
-    m_socket.set_option(tcp::no_delay{true}, ec);
-
-    std::vector<std::byte> frame{};
-    Wire::encodeLogon(key, false, ++m_seq, frame);
-    asio::write(m_socket, asio::buffer(frame), ec);
-    return !ec && await(MsgType::LogonAck).has_value();
-  }
-
-  uint32_t nextSeq() { return ++m_seq; }
-
-  void send(const std::vector<std::byte>& frame) {
-    boost::system::error_code ec{};
-    asio::write(m_socket, asio::buffer(frame), ec);
-  }
-
-  std::optional<Event> await(MsgType wanted) {
-    for (;;) {
-      while (m_size >= Wire::kHeaderSize) {
-        Wire::Header header{};
-        std::memcpy(&header, m_buffer.data(), Wire::kHeaderSize);
-        if (header.length < Wire::kHeaderSize || m_size < header.length) break;
-        const auto decoded{Wire::decodeEvent(
-            header.type,
-            std::span<const std::byte>{m_buffer.data() + Wire::kHeaderSize,
-                                       header.length - Wire::kHeaderSize})};
-        const MsgType type{header.type};
-        std::memmove(m_buffer.data(), m_buffer.data() + header.length,
-                     m_size - header.length);
-        m_size -= header.length;
-        if (type == wanted) return decoded;
-      }
-      boost::system::error_code ec{};
-      const std::size_t bytes{m_socket.read_some(
-          asio::buffer(m_buffer.data() + m_size, m_buffer.size() - m_size),
-          ec)};
-      if (ec) return std::nullopt;
-      m_size += bytes;
-    }
-  }
-
-  tcp::socket& socket() { return m_socket; }
-
- private:
-  tcp::socket m_socket;
-  uint32_t m_seq{0};
-  std::vector<std::byte> m_buffer = std::vector<std::byte>(64 * 1024);
-  std::size_t m_size{0};
-};
 
 struct TcpResult {
   std::vector<uint64_t> samples{};
@@ -347,27 +252,72 @@ TcpResult benchTcp(std::string_view egress, std::size_t iterations,
   server.stop();
   return result;
 }
+// One measured (depth, egress) cell, kept only so --json can write it out.
+struct Cell {
+  std::size_t depth{};
+  std::string egress{};
+  Percentiles ns{};
+  double orders_per_second{};
+  Server::EgressStats stats{};
+};
+
+std::string jsonPercentiles(const Percentiles& p) {
+  return std::format(
+      R"({{"p50":{},"p99":{},"p999":{},"max":{},"mean":{:.1f},"count":{}}})",
+      p.p50, p.p99, p.p999, p.max, p.mean, p.count);
+}
+
+bool writeJson(const std::string& path, uint32_t spin_us,
+               const GatewayResult& gateway, const std::vector<Cell>& cells) {
+  std::string text{std::format(
+      R"({{"spin_us":{},"gateway":{{"resting":{},"crossing":{}}},"tcp":[)",
+      spin_us, jsonPercentiles(gateway.resting),
+      jsonPercentiles(gateway.crossing))};
+  bool first{true};
+  for (const Cell& cell : cells) {
+    if (!first) text += ",";
+    first = false;
+    text += std::format(
+        R"({{"depth":{},"egress":"{}","ns":{},"orders_per_second":{:.1f},)"
+        R"("wakeups":{},"events_drained":{},"market_data_drops":{}}})",
+        cell.depth, cell.egress, jsonPercentiles(cell.ns),
+        cell.orders_per_second, cell.stats.wakeups, cell.stats.events_drained,
+        cell.stats.market_data_drops);
+  }
+  text += "]}\n";
+
+  std::FILE* out{std::fopen(path.c_str(), "wb")};
+  if (out == nullptr) return false;
+  const bool ok{std::fwrite(text.data(), 1, text.size(), out) == text.size()};
+  std::fclose(out);
+  return ok;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
   std::size_t iterations{5'000};
   uint32_t spin_us{0};
+  std::string json_path{};
   for (int i{1}; i < argc; ++i) {
     const std::string_view arg{argv[i]};
     if (arg == "--iterations" && i + 1 < argc) {
       iterations = std::stoul(argv[++i]);
     } else if (arg == "--spin-us" && i + 1 < argc) {
       spin_us = static_cast<uint32_t>(std::stoul(argv[++i]));
+    } else if (arg == "--json" && i + 1 < argc) {
+      json_path = argv[++i];
     } else if (arg == "--help") {
       std::println(
-          "usage: net_loopback_bench [--iterations ROUNDS] [--spin-us N]");
+          "usage: net_loopback_bench [--iterations ROUNDS] [--spin-us N] "
+          "[--json PATH]");
       return 0;
     }
   }
 
   std::println("=== gateway only (no sockets, no threads) ===");
-  benchGateway(iterations);
+  const GatewayResult gateway{benchGateway(iterations)};
 
+  std::vector<Cell> cells{};
   for (const std::size_t depth :
        {std::size_t{1}, std::size_t{8}, std::size_t{32}}) {
     std::println("");
@@ -378,7 +328,8 @@ int main(int argc, char** argv) {
         std::println("{}: no samples", egress);
         continue;
       }
-      report(std::string{"egress="} + std::string{egress}, result.samples);
+      const Percentiles p{
+          report(std::string{"egress="} + std::string{egress}, result.samples)};
       std::println(
           "{:<22} {:>10.0f} orders/s{}", "", result.orders_per_second,
           result.stats.wakeups == 0
@@ -386,6 +337,11 @@ int main(int argc, char** argv) {
               : std::format("   {:.1f} events per eventfd wake",
                             static_cast<double>(result.stats.events_drained) /
                                 static_cast<double>(result.stats.wakeups)));
+      cells.push_back(Cell{.depth = depth,
+                           .egress = std::string{egress},
+                           .ns = p,
+                           .orders_per_second = result.orders_per_second,
+                           .stats = result.stats});
     }
   }
 
@@ -405,5 +361,10 @@ int main(int argc, char** argv) {
   std::println("   clients, pipeline depth ~1 — the lock-free egress buys");
   std::println("   nothing measurable, exactly as the design predicted. It");
   std::println("   is here because writing and measuring it was the point.");
+
+  if (!json_path.empty() && !writeJson(json_path, spin_us, gateway, cells)) {
+    std::println(stderr, "error: could not write {}", json_path);
+    return 1;
+  }
   return 0;
 }
