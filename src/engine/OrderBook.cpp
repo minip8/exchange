@@ -94,9 +94,6 @@ std::expected<Order, EngineError> OrderBook::removeOrder(
       -> std::expected<Order, EngineError> {
     auto& orders{level_it->orders};
     auto order_it{std::ranges::find(orders, order_id, &Order::id)};
-    if (order_it == orders.end()) {
-      return std::unexpected(EngineError::OrderNotFound);
-    }
     Order value{std::move(*order_it)};
     m_order_id_to_side_and_price.erase(order_id);
     orders.erase(order_it);
@@ -111,6 +108,7 @@ std::expected<Order, EngineError> OrderBook::removeOrder(
     return std::unexpected(EngineError::OrderNotFound);
   }
 
+  // Now assuming that the order exists.
   const auto& [order_side, order_price]{order_price_it->second};
 
   if (order_side == Types::OrderSide::Buy) {
