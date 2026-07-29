@@ -60,15 +60,15 @@ about it changed, and symmetrically a new best level pushes one out of view.
 
 So instead the publisher keeps the window it last published and diffs the
 current window against it. Reading the window is O(depth x k) — the level
-vectors are already sorted best-first with empty levels erased, so the top N
-is just the first N entries — which at depth 10 and k of 1-3 is the same
+vectors are sorted worst-first with empty levels erased, so the top N is just
+the last N entries read backwards — which at depth 10 and k of 1-3 is the same
 order of cost, and it is the only formulation that is actually correct at the
 boundary. The dirty-price idea survives as the gate: books with no
 subscribers, and commands that changed nothing, skip the work entirely.
 
 The diff itself is a two-pointer merge, not a pair of nested searches. Both
-windows are already sorted best-first for their side, so walking them
-together is O(depth) where looking each level up in the other window was
+windows are sorted best-first for their side (readWindow reverses), so walking
+them together is O(depth) where looking each level up in the other window was
 O(depth^2) — and this runs on every order, cancel and amend that has a
 subscriber, so the constant is not academic.
 */

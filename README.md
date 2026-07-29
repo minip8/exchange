@@ -41,6 +41,10 @@ Delete `PriceLevel`s that are empty.
 
 Replace `std::function_ref match_predicate` with inlined lambdas by templating `match` on `OrderSide`.
 
+### 981c795
+
+Store `PriceLevel`s in the reverse order, so the best prices are at the back of the `std::vector`.
+
 ## Networking (feat. Claude)
 
 The engine is a pure in-process library; `exchange_server` is the networked

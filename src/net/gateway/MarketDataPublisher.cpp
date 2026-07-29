@@ -52,9 +52,13 @@ uint64_t MarketDataPublisher::sequence(OrderBookId book_id) const {
 }
 
 /*
-The level vectors are already sorted best-first (buys descending, sells
-ascending) and empty levels are erased on the way out, so the best `depth`
-levels are simply the first `depth` entries — no search, no skipping.
+The level vectors are sorted WORST-first (buys ascending, sells descending) so
+that the engine's sweep is an erase-suffix, so the best `depth` levels are the
+last `depth` entries, walked backwards. Empty levels are erased on the way out,
+so there is still no search and no skipping — only the direction differs.
+
+The window this produces is best-first, which is the order the wire and the
+diff below both want; reversing here is what keeps that contract unchanged.
 
 Summing each level's orders is the one O(k) step. k is 1-3 in practice.
 Phase 7 could make it O(1) with a PriceLevel::total_quantity field, which
@@ -66,13 +70,14 @@ void MarketDataPublisher::readWindow(std::span<const PriceLevel> levels,
   out.clear();
   const std::size_t count{std::min<std::size_t>(depth, levels.size())};
   for (std::size_t i{0}; i < count; ++i) {
+    const PriceLevel& level{levels[levels.size() - 1 - i]};
     uint64_t total{0};
-    for (const auto& order : levels[i].orders) total += order.quantity.value;
+    for (const auto& order : level.orders) total += order.quantity.value;
     // A level whose orders sum to zero cannot exist — the engine erases a
     // level as soon as it empties — but skipping it costs nothing and keeps
     // "quantity 0 means deleted" unambiguous on the wire.
     if (total == 0) continue;
-    out.push_back(MdLevel{.price = levels[i].price.value, .quantity = total});
+    out.push_back(MdLevel{.price = level.price.value, .quantity = total});
   }
 }
 
@@ -179,10 +184,9 @@ void MarketDataPublisher::emitSnapshot(const OrderBook& book,
 Two-pointer merge of the previously published window against the current one.
 
 Both vectors arrive sorted best-first for their side — buys descending, sells
-ascending — because readWindow copies them straight off level vectors the
-engine already keeps in price-priority order. That is what makes a single
-linear walk sufficient where the obvious formulation searches one window for
-each entry of the other.
+ascending — because readWindow walks the engine's worst-first level vectors
+backwards. That is what makes a single linear walk sufficient where the obvious
+formulation searches one window for each entry of the other.
 
 The three cases are exactly the three ways two sorted sequences can differ:
 
@@ -211,7 +215,7 @@ void MarketDataPublisher::diffSide(BookMd& md, OrderBookId book_id, Side side,
 
   if (!md.subscribers.empty()) {
     // "Better" is side-relative: the best buy is the highest price, the best
-    // sell the lowest. This is the same ordering the level vectors are in.
+    // sell the lowest. This is the order readWindow emits in.
     const auto better{[side](uint64_t lhs, uint64_t rhs) noexcept {
       return side == Side::Buy ? lhs > rhs : lhs < rhs;
     }};
@@ -295,16 +299,17 @@ void MarketDataPublisher::publishTrade(OrderBookId book_id, uint64_t price,
 
 std::optional<int64_t> MarketDataPublisher::mark(const OrderBook& book,
                                                  OrderBookId book_id) const {
-  // front() is the best level: buys are sorted descending, sells ascending,
-  // and empty levels are erased rather than left behind.
+  // back() is the best level: the level vectors are worst-first (buys
+  // ascending, sells descending), and empty levels are erased rather than
+  // left behind.
   const auto buys{book.buys()};
   const auto sells{book.sells()};
   if (!buys.empty() && !sells.empty()) {
     return static_cast<int64_t>(
-        (buys.front().price.value + sells.front().price.value) / 2);
+        (buys.back().price.value + sells.back().price.value) / 2);
   }
-  if (!buys.empty()) return static_cast<int64_t>(buys.front().price.value);
-  if (!sells.empty()) return static_cast<int64_t>(sells.front().price.value);
+  if (!buys.empty()) return static_cast<int64_t>(buys.back().price.value);
+  if (!sells.empty()) return static_cast<int64_t>(sells.back().price.value);
 
   const auto it{m_books.find(book_id)};
   if (it != m_books.end() && it->second.has_traded) {

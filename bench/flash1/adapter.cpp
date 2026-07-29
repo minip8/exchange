@@ -19,6 +19,7 @@
  */
 #include <cstdint>
 #include <optional>
+#include <ranges>
 #include <vector>
 
 #include "engine/Order.hpp"
@@ -177,17 +178,19 @@ ADAPTER_EXPORT void engine_on_modify(const modify_t* m) {
           m->new_price_ticks, m->new_quantity);
 }
 
-/* The book never erases emptied PriceLevels, so queries skip them. Levels are
- * sorted best-first; the first non-empty one is the best price. */
+/* Levels are sorted WORST-first (buys ascending, sells descending), so the best
+ * price is at the back — hence the reverse walk. The book does erase emptied
+ * levels, so the non-empty check is belt-and-braces rather than load-bearing.
+ * engine_query_depth_at below is a price equality scan, so it is unaffected. */
 ADAPTER_EXPORT int64_t engine_query_best_bid(void) {
-  for (const auto& level : g_book->buys()) {
+  for (const auto& level : g_book->buys() | std::ranges::views::reverse) {
     if (!level.orders.empty()) return decodePrice(level.price);
   }
   return INT64_MIN;
 }
 
 ADAPTER_EXPORT int64_t engine_query_best_ask(void) {
-  for (const auto& level : g_book->sells()) {
+  for (const auto& level : g_book->sells() | std::ranges::views::reverse) {
     if (!level.orders.empty()) return decodePrice(level.price);
   }
   return INT64_MAX;

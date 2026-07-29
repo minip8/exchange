@@ -1,7 +1,10 @@
 #pragma once
 
+#include <algorithm>
 #include <expected>
+#include <iterator>
 #include <optional>
+#include <ranges>
 #include <span>
 #include <type_traits>
 #include <unordered_map>
@@ -50,6 +53,12 @@ class OrderBook {
   std::expected<Order, EngineError> removeOrder(const OrderId&);
   std::expected<std::vector<Fill>, EngineError> modifyOrder(const OrderId&);
   bool contains(const OrderId&) const noexcept;
+  /*
+  Both spans are ordered WORST price first, so the best level is `back()` —
+  buys ascending, sells descending. Callers that want price priority must
+  walk them in reverse; callers that want the best level want `back()`, never
+  `front()`. Empty levels are erased, so `back()` is always a live level.
+  */
   std::span<const PriceLevel> buys() const noexcept { return m_buy_levels; }
   std::span<const PriceLevel> sells() const noexcept { return m_sell_levels; }
   OrderBookId id() const noexcept { return m_id; }
@@ -88,6 +97,12 @@ class OrderBook {
  private:
   OrderBookId m_id;
   Symbol m_symbol;
+  /*
+  Sorted worst-first: buys ascending, sells descending. `back()` is therefore
+  the best level on both sides, which is the end matching consumes and the end
+  new best prices are inserted at — so the hot operations are all push_back /
+  erase-suffix and touch no other element.
+  */
   std::vector<PriceLevel> m_buy_levels{};
   std::vector<PriceLevel> m_sell_levels{};
   std::unordered_map<OrderId, std::pair<OrderSide, OrderPrice>>
@@ -96,22 +111,46 @@ class OrderBook {
  private:
   static inline OrderBookId::T instance_count{};
 };
+/*
+Returns the level holding `order_price`, or — when no such level exists — the
+position it should be inserted at to preserve the worst-first ordering.
+
+The scan runs from `rbegin()`, i.e. from the best price outwards, because that
+is where activity concentrates: a new order is far more often at or near the
+top of book than deep in the tail. `find_if` from `rbegin()` yields the *last*
+level in forward order satisfying the predicate, so `rit.base()` is the
+position just past it — exactly `upper_bound` for the side's ordering — and
+`prev(rit.base())` is the level itself when the price matches exactly.
+*/
 template <OrderSide side, typename Self>
 auto OrderBook::priceLevelIteratorImpl(this Self& self,
                                        const OrderPrice order_price)
     -> std::conditional_t<std::is_const_v<Self>,
                           std::vector<PriceLevel>::const_iterator,
                           std::vector<PriceLevel>::iterator> {
-  if constexpr (side == Types::OrderSide::Buy) {
-    return std::ranges::find_if(self.m_buy_levels,
-                                [order_price](const PriceLevel& price_level) {
-                                  return price_level.price <= order_price;
-                                });
-  } else if constexpr (side == Types::OrderSide::Sell) {
-    return std::ranges::find_if(self.m_sell_levels,
-                                [order_price](const PriceLevel& price_level) {
-                                  return price_level.price >= order_price;
-                                });
+  auto& levels{[&self] -> auto& {
+    if constexpr (side == OrderSide::Buy)
+      return self.m_buy_levels;
+    else
+      return self.m_sell_levels;
+  }()};
+
+  auto comp{[](const PriceLevel& price_level, const OrderPrice order_price_) {
+    if constexpr (side == OrderSide::Buy)
+      return price_level.price <= order_price_;
+    else
+      return price_level.price >= order_price_;
+  }};
+
+  auto rit{
+      std::ranges::find_if(levels.rbegin(), levels.rend(),
+                           [&comp, order_price](const PriceLevel& price_level) {
+                             return comp(price_level, order_price);
+                           })};
+  if (rit == levels.rend() || rit->price != order_price) {
+    return rit.base();
+  } else {
+    return std::prev(rit.base());
   }
 }
 template <OrderSide side>
@@ -125,20 +164,23 @@ std::vector<Fill> OrderBook::match(Order& aggressing_order) {
   }()};
   std::vector<Fill> fills{};
   uint64_t fully_filled_count{};
-  for (PriceLevel& level : resting_levels) {
+  for (PriceLevel& level : resting_levels | std::ranges::views::reverse) {
     auto level_fills{match<side>(level.orders, aggressing_order)};
     if (level_fills.empty()) break;
     fills.insert(fills.end(), level_fills.begin(), level_fills.end());
     fully_filled_count += static_cast<uint64_t>(level.orders.empty());
   }
   /*
-  The `PriceLevel`s to be erased will always be the first `fully_filled_count`
-  levels. It is impossible to be otherwise, because we greedily fill levels from
-  left to right.
+  The `PriceLevel`s to be erased are always the last `fully_filled_count`
+  levels. It is impossible to be otherwise: the best level is `back()`, we
+  greedily fill from the back towards the front, and we stop at the first
+  level that does not fully fill. Erasing a suffix is also why the levels are
+  ordered worst-first — a sweep costs no element moves at all, where a
+  best-at-`front()` book has to shift the entire remaining vector down.
   */
   resting_levels.erase(
-      resting_levels.begin(),
-      resting_levels.begin() + static_cast<long>(fully_filled_count));
+      resting_levels.end() - static_cast<long>(fully_filled_count),
+      resting_levels.end());
   return fills;
 }
 template <OrderSide side>
