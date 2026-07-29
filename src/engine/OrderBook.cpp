@@ -16,7 +16,7 @@
 
 namespace Exchange::Engine {
 template <OrderSide side>
-std::vector<PriceLevel>::iterator OrderBook::priceLevelIterator(
+std::vector<PriceLevel>::const_iterator OrderBook::priceLevelIterator(
     const OrderPrice order_price) const {
   return priceLevelIteratorImpl<side>(order_price);
 }

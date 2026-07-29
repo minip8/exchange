@@ -73,7 +73,8 @@ class OrderBook {
   std::vector<PriceLevel>::iterator tryInsertPriceLevel(const OrderPrice);
 
   template <OrderSide>
-  std::vector<PriceLevel>::iterator priceLevelIterator(const OrderPrice) const;
+  std::vector<PriceLevel>::const_iterator priceLevelIterator(
+      const OrderPrice) const;
 
   template <OrderSide>
   std::vector<PriceLevel>::iterator priceLevelIterator(const OrderPrice);
