@@ -329,7 +329,18 @@ def plot_flash1_latest(record, plots_dir, svg):
     ax.set_yscale("log")
     ax.scatter(xs, [BASELINE_MPS[s] for s in scenarios], marker="_", s=260, linewidths=2,
                color=MUTED, label="baseline (Jul 2026)", zorder=2)
-    ax.scatter(xs, meds, s=70, color=SERIES[0], label="this run", zorder=3)
+    # Min-max across reps rather than a stddev: with only a handful of reps the
+    # observed range is the honest statement of what was actually seen, and it
+    # makes a scenario whose reps disagree impossible to read as a clean point.
+    reps = [f1["scenarios"][s]["mps"] for s in scenarios]
+    if any(len(r) > 1 for r in reps):
+        ax.errorbar(xs, meds,
+                    yerr=[[m - min(r) for m, r in zip(meds, reps)],
+                          [max(r) - m for m, r in zip(meds, reps)]],
+                    fmt="none", ecolor=SERIES[0], elinewidth=1.4, capsize=4,
+                    alpha=0.65, zorder=3)
+    ax.scatter(xs, meds, s=70, color=SERIES[0],
+               label=f"this run (median of {f1['reps_per_scenario']})", zorder=4)
     for x, s, m, ok in zip(xs, scenarios, meds, valid):
         ax.annotate(f"{m:.3f}", (x, m), textcoords="offset points", xytext=(0, 9),
                     ha="center", fontsize=8, color=INK2)
@@ -359,15 +370,30 @@ def plot_flash1_history(history, plots_dir, svg):
     fig, ax = plt.subplots(figsize=(7.8, 4.4))
     ax.set_yscale("log")
     xs = range(len(runs))
+    end_labels = []
     for i, sc in enumerate(SCENARIOS):
         ys = [r["flash1"]["scenarios"].get(sc, {}).get("mps_median", math.nan) for r in runs]
         if all(math.isnan(y) for y in ys):
             continue
+        # Rep spread as a band, same reasoning as the GB trend: a bare line
+        # invites reading run-to-run drift as a change in the engine.
+        reps = [r["flash1"]["scenarios"].get(sc, {}).get("mps", []) for r in runs]
+        los = [min(rp) if len(rp) > 1 else y for rp, y in zip(reps, ys)]
+        his = [max(rp) if len(rp) > 1 else y for rp, y in zip(reps, ys)]
+        ax.fill_between(list(xs), los, his, color=SERIES[i], alpha=0.15, linewidth=0)
         ax.plot(xs, ys, color=SERIES[i], linewidth=1.8, marker="o", markersize=5, label=sc)
         last = max((j for j, y in enumerate(ys) if not math.isnan(y)), default=None)
         if last is not None:
-            ax.annotate(f"{sc}  {ys[last]:.3f}", (last, ys[last]), textcoords="offset points",
-                        xytext=(8, 0), va="center", fontsize=8, color=INK2)
+            end_labels.append((ys[last], last, f"{sc}  {ys[last]:.3f}", SERIES[i]))
+
+    # Scenarios converge once the engine stops collapsing on the volatile ones,
+    # and four end-labels at the same height are unreadable. Stack them in value
+    # order with a fixed point offset rather than pinning each to its own line.
+    end_labels.sort(key=lambda t: t[0])
+    span = 11 * (len(end_labels) - 1) / 2
+    for k, (y, x, text, colour) in enumerate(end_labels):
+        ax.annotate(text, (x, y), textcoords="offset points",
+                    xytext=(9, k * 11 - span), va="center", fontsize=8, color=colour)
     ax.set_xticks(list(xs), [run_label(r) for r in runs], rotation=45, ha="right")
     ax.set_ylabel("median throughput (M msgs/s, log)")
     ax.set_title("flash1 throughput over runs  (* = dirty tree)")
@@ -499,7 +525,12 @@ def main(argv=None):
         print(f"error: no records in {out_dir} — run scripts/bench_pipeline.sh first", file=sys.stderr)
         return 1
     latest = history[-1]
-    print_summary(latest, record_path or "(latest existing record)")
+    # Summarise the record just written, not history[-1]. They differ whenever a
+    # backdated --timestamp is used (bench_backfill.sh always does), and printing
+    # the newest-by-timestamp record there reports some *other* commit's numbers
+    # under the heading of the run that just finished.
+    written_record = record if args.gb_json else latest
+    print_summary(written_record, record_path or "(latest existing record)")
 
     try:
         apply_style()
