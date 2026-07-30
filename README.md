@@ -47,6 +47,10 @@ Replace `std::function_ref match_predicate` with inlined lambdas by templating `
 
 Store `PriceLevel`s in the reverse order, so the best prices are at the back of the `std::vector`.
 
+### cb5c9ca
+
+Store the `Order`s inside the `PriceLevel::orders` in reverse order, so highest time priority is at the back.
+
 ## Networking (feat. Claude)
 
 The engine is a pure in-process library; `exchange_server` is the networked
