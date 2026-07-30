@@ -43,6 +43,18 @@ Delete `PriceLevel`s that are empty.
 
 Replace `std::function_ref match_predicate` with inlined lambdas by templating `match` on `OrderSide`.
 
+### f8c5fb6
+
+Give each `OrderBook` a `Symbol`, and pick the resting side with `if constexpr` rather than a runtime branch.
+
+### c842652
+
+Return a `const_iterator` from the const `priceLevelIterator` overload.
+
+### 2e0115e
+
+Drop the redundant `end()` check in `removeOrder` — the `OrderId` map lookup above it already established that the order exists.
+
 ### 586ecc6
 
 Store `PriceLevel`s in the reverse order, so the best prices are at the back of the `std::vector`.
@@ -50,6 +62,10 @@ Store `PriceLevel`s in the reverse order, so the best prices are at the back of 
 ### cb5c9ca
 
 Store the `Order`s inside the `PriceLevel::orders` in reverse order, so highest time priority is at the back.
+
+### 071e81f
+
+Revert `cb5c9ca` (in `fbd2446`), putting the engine source back to `586ecc6`.
 
 ## Networking (feat. Claude)
 
