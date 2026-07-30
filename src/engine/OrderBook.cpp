@@ -75,13 +75,13 @@ void OrderBook::tryInsertRestingOrder(Order&& order) {
       case Types::OrderSide::Buy: {
         auto level_it{tryInsertPriceLevel<Types::OrderSide::Buy>(order.price)};
         auto& level_orders{level_it->orders};
-        level_orders.push_back(std::move(order));
+        level_orders.insert(level_orders.begin(), std::move(order));
       } break;
 
       case Types::OrderSide::Sell: {
         auto level_it{tryInsertPriceLevel<Types::OrderSide::Sell>(order.price)};
         auto& level_orders{level_it->orders};
-        level_orders.push_back(std::move(order));
+        level_orders.insert(level_orders.begin(), std::move(order));
       } break;
     }
   }
