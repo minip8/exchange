@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # Benchmark pipeline: run both benchmark suites, record, and plot.
 #
-#   scripts/bench_pipeline.sh                 quick run (1 flash1 perf rep/scenario,
+#   scripts/bench_pipeline.sh                 quick run (5 flash1 perf reps/scenario,
 #                                             5 Google Benchmark repetitions)
-#   scripts/bench_pipeline.sh --full          5 flash1 reps/scenario and 15 Google
+#   scripts/bench_pipeline.sh --full          10 flash1 reps/scenario and 15 Google
 #                                             Benchmark repetitions, medians recorded
-#                                             (challenge-style scoring; the official
-#                                             run_challenge.py uses 10 — 5 is a
-#                                             faster personal-machine compromise)
+#                                             (challenge-style scoring — 10 reps is
+#                                             what the official run_challenge.py uses)
 #   scripts/bench_pipeline.sh --skip-flash1   Google Benchmark suite only
 #   scripts/bench_pipeline.sh --net           also run the network latency bench
 #   scripts/bench_pipeline.sh --plot-only     re-render plots from existing records
@@ -21,7 +20,10 @@ HARNESS_DIR="${REPO_ROOT}/external/matching-engine-benchmark"
 SCENARIOS=(static normal swing-25 swing-40 flash-crash)
 
 MODE=quick
-REPS=1
+# flash1 perf reps per scenario. A rep costs ~4s against a suite that already
+# runs for minutes, so there is no reason to record a single unrepeated sample —
+# same argument as GB_REPS below. --full matches run_challenge.py's 10.
+REPS=5
 # Google Benchmark repetitions. One repetition cannot separate a real few-percent
 # change from machine drift, which is how a uniform ~1-7% drift once got recorded
 # as a regression and acted on. Every recorded number is a median over these.
@@ -31,7 +33,7 @@ PLOT_ONLY=0
 RUN_NET=0
 for arg in "$@"; do
   case "${arg}" in
-    --full) MODE=full; REPS=5; GB_REPS=15 ;;
+    --full) MODE=full; REPS=10; GB_REPS=15 ;;
     --skip-flash1) SKIP_FLASH1=1 ;;
     --net) RUN_NET=1 ;;
     --plot-only) PLOT_ONLY=1 ;;
