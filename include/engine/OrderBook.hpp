@@ -1,7 +1,6 @@
 #pragma once
 
 #include <algorithm>
-#include <cstddef>
 #include <expected>
 #include <iterator>
 #include <optional>
@@ -190,10 +189,10 @@ std::vector<Fill> OrderBook::match(std::vector<Order>& resting_orders,
   std::vector<Fill> fills{};
   long fully_filled_count{0};
 
-  for (auto cur_idx{std::ssize(resting_orders) - 1};
-       cur_idx >= 0 && aggressing_order.quantity > OrderQuantity{0};
-       --cur_idx) {
-    Order& resting_order = resting_orders[static_cast<std::size_t>(cur_idx)];
+  while (static_cast<size_t>(fully_filled_count) < resting_orders.size() &&
+         aggressing_order.quantity > OrderQuantity{0}) {
+    Order& resting_order =
+        resting_orders[static_cast<size_t>(fully_filled_count)];
     std::optional<Fill> fill{match<side>(aggressing_order, resting_order)};
     if (!fill.has_value()) break;
     fills.push_back(std::move(fill).value());
@@ -205,13 +204,11 @@ std::vector<Fill> OrderBook::match(std::vector<Order>& resting_orders,
   // from the id index before erasing them from the level.
   for (long i{0}; i < fully_filled_count; ++i) {
     m_order_id_to_side_and_price.erase(
-        resting_orders[static_cast<std::size_t>(std::ssize(resting_orders) - i -
-                                                1)]
-            .id);
+        resting_orders[static_cast<size_t>(i)].id);
   }
 
-  resting_orders.erase(resting_orders.end() - fully_filled_count,
-                       resting_orders.end());
+  resting_orders.erase(resting_orders.begin(),
+                       resting_orders.begin() + fully_filled_count);
 
   return fills;
 }
