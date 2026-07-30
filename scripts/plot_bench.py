@@ -42,13 +42,20 @@ BASELINE_MPS = {
     "flash-crash": 0.059,
 }
 
-# Curated key metrics for the history trend chart.
+# Curated key metrics for the history trend chart. Kept to <= len(SERIES) names
+# per panel so each gets its own colour slot.
 HISTORY_THROUGHPUT = ["BM_MixedWorkload_SteadyState", "BM_Engine_MultiBook_SteadyState/100"]
 HISTORY_LATENCY_NS = [
-    "BM_AddOrder_NoMatch_AtDepth/1024",
-    "BM_RemoveOrder_AtDepth/1024",
+    # The two ends of the level scan: worst-price is the O(depth) case, best-price
+    # is the O(1) one the worst-first layout exists to produce. Tracking both is
+    # what makes a layout change legible rather than just "some number moved".
+    "BM_AddRemove_WorstPrice_AtDepth/1024",
+    "BM_AddRemove_BestPrice_AtDepth/1024",
+    # The two intra-level axes — linear find/erase within a PriceLevel, and the
+    # front-erase a sweep leaves behind.
+    "BM_AddRemove_WithinLevel/256",
+    "BM_AddOrder_Match_WithinLevel/64",
     "BM_AddOrder_Match_SweepLevels/64",
-    "BM_Engine_AddOrder_Routed/512",
 ]
 
 # Light-mode reference palette (validated fixed order — do not re-order).
@@ -154,10 +161,40 @@ def load_history(out_dir):
 
 
 def gb_entries(record):
+    """One entry per benchmark name: the median across repetitions if the run
+    had any, else the single iteration.
+
+    Runs recorded before repetitions were added carry only `iteration` rows, so
+    the fallback is what keeps those records loadable. Aggregate rows carry the
+    repetition count in `name` suffixes (`X_median`), so they are re-keyed back
+    to the plain benchmark name here and nowhere else needs to know.
+    """
+    benchmarks = record["google_benchmark"].get("benchmarks", [])
+    medians = {
+        b["run_name"]: b
+        for b in benchmarks
+        if b.get("run_type") == "aggregate" and b.get("aggregate_name") == "median"
+    }
+    if medians:
+        for name, b in medians.items():
+            yield {**b, "name": name}
+        return
+    for b in benchmarks:
+        if b.get("run_type", "iteration") == "iteration":
+            yield b
+
+
+def gb_stddev(record, name):
+    """Stddev across repetitions for one benchmark, in the entry's own units.
+    None for single-repetition records, which have no aggregates."""
     for b in record["google_benchmark"].get("benchmarks", []):
-        if b.get("run_type", "iteration") != "iteration":
-            continue
-        yield b
+        if (
+            b.get("run_type") == "aggregate"
+            and b.get("aggregate_name") == "stddev"
+            and b.get("run_name") == name
+        ):
+            return b
+    return None
 
 
 def real_time_ns(entry):
@@ -410,13 +447,25 @@ def plot_gb_history(history, plots_dir, svg):
 
     def series(ax, names, pick_throughput, ylabel):
         for i, name in enumerate(names):
-            ys = []
+            ys, los, his = [], [], []
             for r in runs:
                 m = gb_metric(r, name)
-                ys.append(m[0] if m and m[1] == pick_throughput else math.nan)
+                y = m[0] if m and m[1] == pick_throughput else math.nan
+                ys.append(y)
+                # Spread across repetitions. Without it a few-percent step
+                # between two runs is unreadable — which is exactly how machine
+                # drift once got mistaken for a regression.
+                sd = gb_stddev(r, name)
+                d = None
+                if sd is not None and not math.isnan(y):
+                    d = sd.get("items_per_second") if pick_throughput else real_time_ns(sd)
+                los.append(y if d is None else y - d)
+                his.append(y if d is None else y + d)
             if all(math.isnan(y) for y in ys):
                 continue
-            ax.plot(xs, ys, color=SERIES[i], linewidth=1.8, marker="o", markersize=5,
+            colour = SERIES[i % len(SERIES)]
+            ax.fill_between(list(xs), los, his, color=colour, alpha=0.18, linewidth=0)
+            ax.plot(xs, ys, color=colour, linewidth=1.8, marker="o", markersize=5,
                     label=name.removeprefix("BM_"))
         ax.set_yscale("log")
         ax.set_ylabel(ylabel)

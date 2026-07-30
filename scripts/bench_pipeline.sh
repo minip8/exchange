@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Benchmark pipeline: run both benchmark suites, record, and plot.
 #
-#   scripts/bench_pipeline.sh                 quick run (1 flash1 perf rep/scenario)
-#   scripts/bench_pipeline.sh --full          5 reps/scenario, median recorded
+#   scripts/bench_pipeline.sh                 quick run (1 flash1 perf rep/scenario,
+#                                             5 Google Benchmark repetitions)
+#   scripts/bench_pipeline.sh --full          5 flash1 reps/scenario and 15 Google
+#                                             Benchmark repetitions, medians recorded
 #                                             (challenge-style scoring; the official
 #                                             run_challenge.py uses 10 — 5 is a
 #                                             faster personal-machine compromise)
@@ -20,12 +22,16 @@ SCENARIOS=(static normal swing-25 swing-40 flash-crash)
 
 MODE=quick
 REPS=1
+# Google Benchmark repetitions. One repetition cannot separate a real few-percent
+# change from machine drift, which is how a uniform ~1-7% drift once got recorded
+# as a regression and acted on. Every recorded number is a median over these.
+GB_REPS=5
 SKIP_FLASH1=0
 PLOT_ONLY=0
 RUN_NET=0
 for arg in "$@"; do
   case "${arg}" in
-    --full) MODE=full; REPS=5 ;;
+    --full) MODE=full; REPS=5; GB_REPS=15 ;;
     --skip-flash1) SKIP_FLASH1=1 ;;
     --net) RUN_NET=1 ;;
     --plot-only) PLOT_ONLY=1 ;;
@@ -58,8 +64,12 @@ DIRTY=false
 (cd "${REPO_ROOT}" && cmake --preset release && cmake --build --preset bench)
 GB_JSON="$(mktemp /tmp/exchange_gb.XXXXXX.json)"
 trap 'rm -f "${GB_JSON}"' EXIT
+# --benchmark_display_aggregates_only keeps the console readable; every
+# individual repetition is still written to the JSON, so the record keeps the
+# raw data and plot_bench.py reads the median/stddev aggregates from it.
 "${REPO_ROOT}/build/release/bench/google/exchange_bench" \
-  --benchmark_format=console --benchmark_out_format=json --benchmark_out="${GB_JSON}"
+  --benchmark_format=console --benchmark_out_format=json --benchmark_out="${GB_JSON}" \
+  --benchmark_repetitions="${GB_REPS}" --benchmark_display_aggregates_only=true
 
 # --- flash1 harness (perf mode; audit measures correctness, not throughput) ---
 FLASH1_RESULTS=()
