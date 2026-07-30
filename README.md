@@ -43,7 +43,7 @@ Delete `PriceLevel`s that are empty.
 
 Replace `std::function_ref match_predicate` with inlined lambdas by templating `match` on `OrderSide`.
 
-### 981c795
+### 586ecc6
 
 Store `PriceLevel`s in the reverse order, so the best prices are at the back of the `std::vector`.
 
