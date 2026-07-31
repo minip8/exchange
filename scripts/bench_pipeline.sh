@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Benchmark pipeline: run both benchmark suites, record, and plot.
 #
-#   scripts/bench_pipeline.sh                 quick run (5 flash1 perf reps/scenario,
-#                                             5 Google Benchmark repetitions)
-#   scripts/bench_pipeline.sh --full          10 flash1 reps/scenario and 15 Google
-#                                             Benchmark repetitions, medians recorded
+#   scripts/bench_pipeline.sh                 quick run (5 flash1 perf reps/scenario)
+#   scripts/bench_pipeline.sh --full          10 flash1 reps/scenario
 #                                             (challenge-style scoring — 10 reps is
 #                                             what the official run_challenge.py uses)
 #   scripts/bench_pipeline.sh --skip-flash1   Google Benchmark suite only
 #   scripts/bench_pipeline.sh --net           also run the network latency bench
 #   scripts/bench_pipeline.sh --plot-only     re-render plots from existing records
+#
+# exchange_bench always runs at --benchmark_repetitions=1, in both modes; only
+# the flash1 rep count varies.
 #
 # Output: one record JSON in bench/results/ (gitignored) + PNGs in
 # bench/results/plots/. Plotting runs via uv (deps inline in plot_bench.py).
@@ -21,25 +22,21 @@ SCENARIOS=(static normal swing-25 swing-40 flash-crash)
 
 MODE=quick
 # flash1 perf reps per scenario. A rep costs ~4s against a suite that already
-# runs for minutes, so there is no reason to record a single unrepeated sample —
-# same argument as GB_REPS below. --full matches run_challenge.py's 10.
+# runs for minutes, so there is no reason to record a single unrepeated sample.
+# --full matches run_challenge.py's 10.
 REPS=5
-# Google Benchmark repetitions. One repetition cannot separate a real few-percent
-# change from machine drift, which is how a uniform ~1-7% drift once got recorded
-# as a regression and acted on. Every recorded number is a median over these.
-GB_REPS=5
 SKIP_FLASH1=0
 PLOT_ONLY=0
 RUN_NET=0
 for arg in "$@"; do
   case "${arg}" in
-    --full) MODE=full; REPS=10; GB_REPS=15 ;;
+    --full) MODE=full; REPS=10 ;;
     --skip-flash1) SKIP_FLASH1=1 ;;
     --net) RUN_NET=1 ;;
     --plot-only) PLOT_ONLY=1 ;;
     *)
       echo "error: unknown flag '${arg}'" >&2
-      sed -n '2,14p' "${BASH_SOURCE[0]}" >&2
+      sed -n '2,16p' "${BASH_SOURCE[0]}" >&2
       exit 1
       ;;
   esac
@@ -66,12 +63,14 @@ DIRTY=false
 (cd "${REPO_ROOT}" && cmake --preset release && cmake --build --preset bench)
 GB_JSON="$(mktemp /tmp/exchange_gb.XXXXXX.json)"
 trap 'rm -f "${GB_JSON}"' EXIT
-# --benchmark_display_aggregates_only keeps the console readable; every
-# individual repetition is still written to the JSON, so the record keeps the
-# raw data and plot_bench.py reads the median/stddev aggregates from it.
+# One repetition: the record carries a single `iteration` row per benchmark and
+# no aggregates, which is the shape plot_bench.py falls back to (gb_entries) and
+# which leaves gb_stddev returning None, so the trend chart draws no spread band.
+# --benchmark_display_aggregates_only is deliberately absent — with one
+# repetition there are no aggregates for it to display.
 "${REPO_ROOT}/build/release/bench/google/exchange_bench" \
   --benchmark_format=console --benchmark_out_format=json --benchmark_out="${GB_JSON}" \
-  --benchmark_repetitions="${GB_REPS}" --benchmark_display_aggregates_only=true
+  --benchmark_repetitions=1
 
 # --- flash1 harness (perf mode; audit measures correctness, not throughput) ---
 FLASH1_RESULTS=()

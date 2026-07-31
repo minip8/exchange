@@ -3,9 +3,11 @@
 #
 #   scripts/bench_backfill.sh                 backfill the default commit set
 #   scripts/bench_backfill.sh <sha> [<sha>…]  backfill specific commits
-#   scripts/bench_backfill.sh --reps N        GB repetitions (default 5)
 #   scripts/bench_backfill.sh --flash1-reps N flash1 perf reps/scenario (default 5)
 #   scripts/bench_backfill.sh --skip-flash1   Google Benchmark suite only
+#
+# exchange_bench always runs at --benchmark_repetitions=1; only the flash1 rep
+# count is tunable.
 #
 # Why this exists: bench_pipeline.sh always records HEAD at wall-clock now, so it
 # cannot express "these are commit X's numbers". plot_bench.py can — it takes
@@ -44,17 +46,15 @@ WORK_DIR="${REPO_ROOT}/build/backfill"
 # floor — the yardstick for judging whether any other step here is real.
 DEFAULT_COMMITS=(f8c5fb6 c842652 2e0115e 586ecc6 cb5c9ca HEAD)
 
-GB_REPS=5
 FLASH1_REPS=5
 SKIP_FLASH1=0
 SCENARIOS=(static normal swing-25 swing-40 flash-crash)
 COMMITS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --reps) GB_REPS="$2"; shift 2 ;;
     --flash1-reps) FLASH1_REPS="$2"; shift 2 ;;
     --skip-flash1) SKIP_FLASH1=1; shift ;;
-    -h|--help) sed -n '2,33p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,35p' "${BASH_SOURCE[0]}"; exit 0 ;;
     -*) echo "error: unknown flag '$1'" >&2; exit 1 ;;
     *) COMMITS+=("$1"); shift ;;
   esac
@@ -112,9 +112,12 @@ for ref in "${COMMITS[@]}"; do
   (cd "${TREE}" && cmake --preset release >/dev/null && cmake --build --preset bench >/dev/null)
 
   GB_JSON="${WORK_DIR}/${SHORT}.json"
+  # One repetition, so the JSON carries a single `iteration` row per benchmark
+  # and no aggregates. --benchmark_display_aggregates_only is deliberately
+  # absent — with one repetition there are no aggregates for it to display.
   "${TREE}/build/release/bench/google/exchange_bench" \
     --benchmark_format=console --benchmark_out_format=json --benchmark_out="${GB_JSON}" \
-    --benchmark_repetitions="${GB_REPS}" --benchmark_display_aggregates_only=true
+    --benchmark_repetitions=1
 
   # --- flash1, using this commit's own adapter (see the header) ---
   FLASH1_ARGS=()
