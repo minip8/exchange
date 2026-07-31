@@ -74,7 +74,9 @@ Scenarios: `static | normal | swing-25 | swing-40 | flash-crash`. Requires `libb
 
 ### Benchmark pipeline (run + record + plot)
 
-`scripts/bench_pipeline.sh` runs the Google Benchmark suite (Release) plus one flash1 `perf` rep per scenario, writes a timestamped + git-SHA-tagged record JSON to gitignored `bench/results/`, and renders PNGs (latest snapshot + trend over history) to `bench/results/plots/`. Flags: `--full` (10 flash1 reps/scenario — challenge-style scoring), `--skip-flash1`, `--plot-only`. Plotting needs `uv`; Python deps are declared inline in `scripts/plot_bench.py` (PEP 723). The flash1 baseline used for reference lines is hardcoded in `plot_bench.py` (`BASELINE_MPS`) — keep it in sync with the numbers below.
+`scripts/bench_pipeline.sh` runs the Google Benchmark suite (Release) plus one flash1 `perf` rep per scenario, writes a timestamped + git-SHA-tagged record JSON to gitignored `bench/results/`, and renders PNGs (latest snapshot + trend over history) to `bench/results/plots/`. Flags: `--full` (10 flash1 reps/scenario — challenge-style scoring), `--skip-flash1`, `--skip-hist`, `--plot-only`. Plotting needs `uv`; Python deps are declared inline in `scripts/plot_bench.py` (PEP 723). The flash1 baseline used for reference lines is hardcoded in `plot_bench.py` (`BASELINE_MPS`) — keep it in sync with the numbers below.
+
+`bench_pipeline.sh` invokes `exchange_bench` **twice**: the default run excludes the flash1 replay benchmarks (`--benchmark_filter='-^BM_Flash1_'` — the leading `-` is Google Benchmark's negative filter), and a second filtered run does only those, writing the per-op latency sidecar. Different processes, so a 2M-message stream replay cannot perturb the microbenchmarks being trended. See "flash1 per-operation latency distribution" below.
 
 Google Benchmark runs at **1 repetition** in both `bench_pipeline.sh` and `bench_backfill.sh`, in every mode — neither script exposes a knob for it. Records therefore carry a single `iteration` row per benchmark and no aggregates; `plot_bench.py` handles that (its `gb_entries` falls back to `iteration` rows, and `gb_stddev` returns `None`, so the trend chart draws no spread band).
 
@@ -85,6 +87,17 @@ Note that one repetition cannot separate a real few-percent change from machine 
 **The score is the worst-case scenario, not the average.** Baseline (WSL2, July 2026): normal 1.91 M/s, static 1.12, swing-25 0.16, swing-40 0.092, flash-crash 0.059 — so 0.059 M/s. The collapse on volatile scenarios is attributed to the vector book's linear level scans.
 
 **These baseline numbers are known to be low, and are deliberately left as-is.** They are an early-history snapshot, not a current measurement — as of July 2026 flash-crash measures ~4.2 M/s, ~70× the figure above, and the volatile-scenario collapse described just above no longer reproduces. So **beating the baseline by one or two orders of magnitude is expected, not a red flag** — in particular it does not mean a change has broken the harness into a fast failure path. Check that the usual way (`run_flash1.sh audit <scenario>` → `Status: PASS` with a matching hash, `Verdict: VALID`); that is the real correctness gate. To attribute a throughput change, compare against a build of the parent commit, not against these figures. Treat `BASELINE_MPS` in `plot_bench.py` the same way: a floor marker, not a target.
+
+### flash1 per-operation latency distribution
+
+`bench/google/bench_flash1_replay.cpp` replays the flash1 order stream through one `OrderBook`, times **every message individually**, and reports a distribution (x = time of one operation, y = frequency) rather than a mean — `flash1_latency.png`, plus a `--hist-json` sidecar embedded in the record under the additive `flash1_latency` key. Opt-in via `--benchmark_filter='^BM_Flash1_'`; self-skips when `external/` is missing. Full detail in `docs/BENCHMARKING.md`; the four things that matter:
+
+- It **deliberately breaks rule 2 of `BenchSupport.hpp`** (no clocks in the timed region) because here the timing *is* the measurement. The tax is measured, not assumed: `TscTimer.hpp` publishes the empty `rdtsc`-pair distribution as a "timer floor", and every benchmark has a `_NoTiming` twin with the instrumentation compiled out. **The ns/op this benchmark prints is instrumented** — the twin beside it is the real cost, and the gap is large (~+90% on `normal`) because the fences also forbid cross-operation overlap.
+- Registered with **`->Iterations(1)`**, which short-circuits Google Benchmark's ramp so one repetition is exactly one stream replay. Without it, samples from the discarded warm-up trials blend into the published histogram.
+- Replay semantics are **byte-identical to `bench/flash1/adapter.cpp`** (price flip, explicit-id `Order` ctor, IOC residual pull, modify as remove + re-add). Do not change one without the other.
+- The gate is the **reject counts**, not a hash: zero rejected cancels means the stream never replayed (the generator plants ~2% duplicates), a flood means a fast failure path, and both `SkipWithError`. Correctness itself stays with `run_flash1.sh audit`.
+
+On WSL2 the CPUID invariant-TSC bit is masked, so `TscTimer.hpp` accepts kernel corroboration (`tsc_known_freq`) and records which evidence it used; with none it publishes **ticks** and labels the chart accordingly. The TSC also steps ~39 counts at a time here, so the instrument's real resolution is ~10 ns — reported as `timer.resolution` and used to pick display bins.
 
 Formatting: `.clang-format` is `BasedOnStyle: Google` (2-space indent). Run `clang-format -i` on changed files.
 

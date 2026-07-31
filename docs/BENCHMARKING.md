@@ -90,21 +90,102 @@ flash1 `perf` rep per scenario, writes a timestamped + git-SHA-tagged record JSO
 to gitignored `bench/results/`, and renders PNGs to `bench/results/plots/`.
 
 ```bash
-scripts/bench_pipeline.sh                 # quick: 1 flash1 perf rep/scenario
-scripts/bench_pipeline.sh --full          # 5 reps/scenario, median recorded
+scripts/bench_pipeline.sh                 # quick: 5 flash1 perf reps/scenario
+scripts/bench_pipeline.sh --full          # 10 reps/scenario, median recorded
 scripts/bench_pipeline.sh --skip-flash1   # Google Benchmark suite only
+scripts/bench_pipeline.sh --skip-hist     # skip the per-op latency distribution
 scripts/bench_pipeline.sh --net           # also run the loopback latency bench
 scripts/bench_pipeline.sh --plot-only     # re-render plots from existing records
 ```
 
-`--full` is challenge-style scoring; the official `run_challenge.py` uses 10
-reps, 5 is the personal-machine compromise. Plots:
-`bench/results/plots/{flash1_latest,flash1_history,gb_latest,gb_history}.png`.
+`--full` is challenge-style scoring, matching `run_challenge.py`'s 10 reps.
+Plots: `bench/results/plots/{flash1_latest,flash1_history,gb_latest,gb_history,
+flash1_latency}.png`.
 
 Plotting needs `uv`; Python deps are declared inline in `scripts/plot_bench.py`
 (PEP 723). `--net` output is deliberately *not* folded into the record JSON — a
 latency distribution across pipeline depths and two egress implementations does
 not fit the one-number-per-scenario shape the plots are built around.
+
+`exchange_bench` is invoked **twice**, and this is not an accident: the default
+run carries `--benchmark_filter='-^BM_Flash1_'` (the leading `-` is Google
+Benchmark's negative filter) and a second run does only the flash1 replay. They
+are different processes so the microbenchmark numbers the pipeline trends are
+untouched by a 2M-message stream replay sharing their address space.
+
+## The flash1 per-operation latency distribution
+
+Everything else in the Google Benchmark suite reports a mean over a synthetic
+fixture. `BM_Flash1_Replay/<scenario>` (`bench/google/bench_flash1_replay.cpp`)
+instead replays the *actual* flash1 order stream through one `OrderBook`, timing
+every message individually, and reports the **distribution**: how long one
+operation took, and how often. That is what separates "the median add is 60 ns"
+from "one add in a thousand sweeps 40 levels and costs 9 µs".
+
+```bash
+cmake --build --preset bench
+./build/release/bench/google/exchange_bench \
+  --benchmark_filter='^BM_Flash1_' \
+  --harness-dir "$PWD/external/matching-engine-benchmark" \
+  --hist-json /tmp/hist.json
+```
+
+Opt-in, and it self-skips with a clear message when `external/` is absent, so
+the flags above are the whole interface. `--hist-count` / `--hist-seed` pick a
+different generator stream; `bench_main.cpp` owns these flags, which is why this
+binary no longer links `benchmark_main`.
+
+Replay semantics are **byte-identical to `bench/flash1/adapter.cpp`** — the same
+price sign-flip, the same explicit-id `Order` constructor, the same IOC residual
+pull, modify as remove + re-add. If the two diverge these numbers stop describing
+what the conformance harness measures.
+
+Four things are load-bearing:
+
+- **This deliberately breaks rule 2 of `BenchSupport.hpp`** (no clock reads in a
+  timed region). Here the per-operation time *is* the measurement. The tax is
+  therefore measured rather than assumed, twice over: `TscTimer.hpp` publishes
+  the distribution of an empty `rdtsc` start/stop pair (the "timer floor" line on
+  the chart — everything left of it is instrument, not engine), and every
+  benchmark has a `_NoTiming` twin running the identical replay with the timing
+  compiled out. **The ns/op this benchmark reports is instrumented**; the twin
+  beside it is the real per-operation cost. Expect a large gap (~+90% on
+  `normal`): the fences also forbid the cross-operation overlap the twin enjoys,
+  so the twin is a lower bound, not a matched control.
+- **Registered with `->Iterations(1)`.** Google Benchmark's default ramp calls the
+  body several times with growing iteration counts and keeps only the last;
+  samples from those discarded trials would silently blend into the published
+  distribution. An explicit iteration count short-circuits the ramp
+  (`benchmark_runner.cc:517-521`), so one repetition is exactly one stream replay.
+- **The TSC does not advance one count at a time.** On WSL2 here it steps ~39
+  counts, so the instrument's real resolution is ~10 ns, not 0.26 ns — reported
+  as `timer.resolution` and used by `plot_bench.py` to pick display bins. Without
+  it the low end of the histogram is a picket fence of alternating occupied and
+  empty buckets. Note also that the CPUID invariant-TSC bit is *masked* under
+  Hyper-V, so `TscTimer.hpp` accepts kernel corroboration (`constant_tsc` +
+  `nonstop_tsc`, or `tsc_known_freq`) as evidence and records which it used in
+  `timer.invariant_evidence`. With no evidence at all it publishes **ticks**, not
+  nanoseconds, and says so on the chart — a frequency-scaled TSC gives a
+  perfectly plausible shape with a false scale.
+- **The gate is the reject counts, not a hash.** Correctness stays with
+  `scripts/run_flash1.sh audit`. The generator plants ~2% duplicate cancels and
+  stale modifies, so zero rejected cancels means the stream never reached the
+  book, and a flood means the run found a fast failure path. Either fails the
+  benchmark via `SkipWithError`, as does a backwards TSC delta (a thread
+  migration across cores with unsynchronised TSCs).
+
+Reading `flash1_latency.png`: one panel per scenario, one colour per message
+kind, log on both axes — the mode is ~1e6 samples and the tail is ~1e0, so on a
+linear y the tail is a flat line on the axis. The `static` panel is the
+interesting one: with almost nothing crossing, the book grows without bound and
+`cancel` develops a second mode two decades right of the first, which is the
+vector book's linear level scan made visible.
+
+Sidecar JSON (`--hist-json`) carries full-resolution buckets as `edges` + `counts`
+per kind per scenario, plus exact per-kind percentiles; `plot_bench.py --hist-json`
+embeds it in the record under `flash1_latency`. That key is additive — records
+written before it exist simply lack it, which is why `SCHEMA_VERSION` did not
+move.
 
 ## Network workload benchmark
 
