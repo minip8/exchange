@@ -12,7 +12,8 @@ re-plot from the existing history in bench/results/.
 One self-contained JSON record per pipeline run:
   bench/results/run_<UTCts>_<shortsha>[-dirty].json
 Plots (regenerated from full history every run):
-  bench/results/plots/{flash1_latest,flash1_history,gb_latest,gb_history}.png
+  bench/results/plots/{flash1_latest,flash1_history,gb_latest,gb_history,
+                       flash1_latency}.png
 """
 
 import argparse
@@ -75,6 +76,8 @@ def parse_args(argv):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--gb-json", type=Path, help="fresh Google Benchmark JSON; omit to only re-plot history")
     p.add_argument("--flash1-results", type=Path, nargs="*", default=[], help="harness result JSONs for this run")
+    p.add_argument("--hist-json", type=Path, default=None,
+                   help="exchange_bench --hist-json sidecar: the flash1 per-op latency distribution")
     p.add_argument("--harness-commit", default=None)
     p.add_argument("--sha", default=None)
     p.add_argument("--dirty", choices=["true", "false"], default="false")
@@ -121,6 +124,17 @@ def assemble_record(args):
             "all_valid": all(v == "VALID" for s in scenarios.values() for v in s["verdicts"]),
         }
 
+    # Additive and optional: records written before this existed simply lack the
+    # key, which is why SCHEMA_VERSION does NOT move — load_history() drops every
+    # record whose schema differs, so bumping it would silently erase the whole
+    # trend history. Every reader below uses .get().
+    flash1_latency = None
+    if args.hist_json:
+        try:
+            flash1_latency = json.loads(args.hist_json.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"warning: skipping unreadable hist json {args.hist_json}: {e}", file=sys.stderr)
+
     ts = datetime.strptime(args.timestamp, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
     return {
         "schema": SCHEMA_VERSION,
@@ -131,6 +145,7 @@ def assemble_record(args):
         "mode": args.mode,
         "google_benchmark": gb,
         "flash1": flash1,
+        "flash1_latency": flash1_latency,
     }
 
 
@@ -205,6 +220,12 @@ def classify_gb(record):
     """Split benchmarks into ranged families, flat ns/op, and throughput."""
     ranged, flat_ns, throughput = {}, {}, {}
     for b in gb_entries(record):
+        # The flash1 replay is a 2M-message stream, not a microbenchmark, and its
+        # reported ns/op is instrumented. The pipeline runs it in a separate
+        # invocation so these rows never reach the record; this is the belt to
+        # that braces, for a hand-made unfiltered --benchmark_out=json.
+        if b["name"].startswith("BM_Flash1_"):
+            continue
         name, _, arg = b["name"].partition("/")
         if "items_per_second" in b:
             throughput[b["name"]] = b["items_per_second"]
@@ -265,7 +286,47 @@ def print_summary(record, record_path):
         m = gb_metric(record, name)
         if m:
             print(f"  {name:<40} {m[0]:,.0f} ns/op")
+    print_latency_summary(record)
     print()
+
+
+def print_latency_summary(record):
+    lat = record.get("flash1_latency")
+    if not lat:
+        return
+    runs = [r for r in lat.get("runs", []) if r.get("instrumented") and r.get("ops")]
+    if not runs:
+        return
+    timer = lat.get("timer") or {}
+    unit = "ns" if timer.get("units") == "ns" else "ticks"
+    floor = (timer.get("overhead") or {}).get("p50")
+    raw_ns = {r["scenario"]: r.get("ns_per_op")
+              for r in lat["runs"] if not r.get("instrumented")}
+
+    print(f"flash1 per-op latency ({unit}, timer floor "
+          f"{floor:.1f} via {timer.get('source', '?')}/{timer.get('invariant_evidence', '?')}):"
+          if floor else "flash1 per-op latency:")
+    if unit != "ns":
+        print("  *** TSC rate unverified — these are ticks, not time ***")
+    for run in sorted(runs, key=lambda r: SCENARIOS.index(r["scenario"])
+                      if r["scenario"] in SCENARIOS else 99):
+        sc = run["scenario"]
+        raw = raw_ns.get(sc)
+        tax = (f"  (+{(run['ns_per_op'] - raw) / raw * 100:.0f}% vs {raw:.0f} raw)"
+               if raw and run.get("ns_per_op") else "")
+        print(f"  {sc:<12} {run['ns_per_op']:6.1f} ns/op instrumented{tax}")
+        for kind, _ in OP_KINDS:
+            op = run["ops"].get(kind)
+            if not op or not op.get("count"):
+                continue
+            print(f"    {kind:<9} n={op['count']:>9,}  p50={op['p50']:>8.1f}  "
+                  f"p99={op['p99']:>9.1f}  p99.9={op['p999']:>9.1f}  max={op['max']:>10.1f}")
+        counters = run.get("counters", {})
+        if counters.get("cancel_rejects", 0) == 0:
+            print("    *** zero rejected cancels — the stream did not really replay ***")
+        if counters.get("timer_anomalies", 0):
+            print(f"    *** {counters['timer_anomalies']} backwards TSC deltas — "
+                  "thread migrated across unsynchronised cores ***")
 
 
 # --------------------------------------------------------------------- plots
@@ -506,6 +567,166 @@ def plot_gb_history(history, plots_dir, svg):
     return True
 
 
+# The four message kinds the flash1 replay separates. Colour is the op-kind
+# channel here, which is why the percentile marks below are drawn in ink with
+# different linestyles rather than in the QUANTILES colours plot_net_bench.py
+# uses — there, quantiles are the series; here, they are annotation.
+OP_KINDS = [("new", SERIES[0]), ("new_ioc", SERIES[1]),
+            ("cancel", SERIES[2]), ("modify", SERIES[3])]
+OP_LABELS = {"new": "new", "new_ioc": "new (IOC)", "cancel": "cancel",
+             "modify": "modify"}
+QUANTILE_MARKS = [(0.50, "-", "p50"), (0.99, "--", "p99"), (0.999, ":", "p99.9")]
+
+
+def merged_quantiles(ops, quantiles):
+    """Quantiles over all op kinds pooled, from the per-kind bucket arrays.
+
+    Exact with respect to the bucketed data: each bucket contributes its count
+    at its own upper edge, which is the same upper-edge convention the C++ side
+    reports per kind.
+    """
+    pairs = []
+    for op in ops.values():
+        edges, counts = op.get("edges") or [], op.get("counts") or []
+        pairs += [(edges[i + 1], c) for i, c in enumerate(counts) if c]
+    if not pairs:
+        return {}
+    pairs.sort()
+    total = sum(c for _, c in pairs)
+    out = {}
+    for q in quantiles:
+        target, seen = q * total, 0
+        out[q] = pairs[-1][0]
+        for edge, count in pairs:
+            seen += count
+            if seen > target:
+                out[q] = edge
+                break
+    return out
+
+
+def rebin_log(edges, counts, bins_per_decade=26, resolution=0.0):
+    """Aggregate the sidecar's ~3%-resolution buckets onto a coarser display grid.
+
+    Display only — the record keeps full resolution. Two things force this. The
+    stored buckets are finer than the timer's own quantum near the floor, so
+    plotting them faithfully draws a picket fence of alternating occupied and
+    empty buckets that reads as noise; and the TSC does not advance one count at
+    a time (see TimerCalibration::resolution_ticks), so no bin narrower than
+    that quantum can ever be occupied.
+
+    Hence a grid that is geometric in the body and at least one quantum wide at
+    the low end — which is where the two constraints disagree.
+    """
+    lo = next((e for e in edges if e > 0), None)
+    hi = edges[-1]
+    if lo is None or hi <= lo:
+        return edges, counts
+
+    ratio = 10 ** (1.0 / bins_per_decade)
+    new_edges, edge = [lo], lo
+    while edge < hi:
+        edge = max(edge * ratio, edge + resolution)
+        new_edges.append(edge)
+    new_counts = [0] * (len(new_edges) - 1)
+    index = 0
+    for i, count in enumerate(counts):
+        if not count:
+            continue
+        while index + 1 < len(new_counts) and edges[i] >= new_edges[index + 1]:
+            index += 1
+        new_counts[index] += count
+    return new_edges, new_counts
+
+
+def plot_flash1_latency(record, plots_dir, svg):
+    """Per-operation latency distribution: x = time of one operation, y = how
+    often. Log on both axes — the mode is ~1e6 samples and the tail is ~1e0, so
+    on a linear y the tail, which is the entire reason for the plot, is a flat
+    line lying on the axis."""
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+
+    lat = record.get("flash1_latency")
+    if not lat:
+        return False
+    runs = [r for r in lat.get("runs", []) if r.get("instrumented") and r.get("ops")]
+    if not runs:
+        return False
+    raw_ns = {r["scenario"]: r.get("ns_per_op")
+              for r in lat["runs"] if not r.get("instrumented")}
+    by_scenario = {r["scenario"]: r for r in runs}
+    scenarios = [s for s in SCENARIOS if s in by_scenario]
+    scenarios += [s for s in by_scenario if s not in SCENARIOS]
+
+    timer = lat.get("timer") or {}
+    in_ns = timer.get("units") == "ns"
+    unit = "ns" if in_ns else "TSC ticks"
+
+    ncols = 2
+    nrows = math.ceil(len(scenarios) / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(11.5, 3.3 * nrows + 1.0))
+    axes = axes.flatten() if len(scenarios) > 1 else [axes]
+
+    for ax, scenario in zip(axes, scenarios):
+        run = by_scenario[scenario]
+        ops = run["ops"]
+        for kind, colour in OP_KINDS:
+            op = ops.get(kind)
+            if not op or not op.get("counts"):
+                continue
+            edges, counts = rebin_log(op["edges"], op["counts"],
+                                      resolution=timer.get("resolution") or 0.0)
+            ax.stairs(counts, edges, color=colour, fill=True, alpha=0.12, linewidth=0)
+            ax.stairs(counts, edges, color=colour, linewidth=1.3)
+
+        marks = merged_quantiles(ops, [q for q, _, _ in QUANTILE_MARKS])
+        for q, style, _ in QUANTILE_MARKS:
+            if q in marks:
+                ax.axvline(marks[q], color=INK2, linestyle=style, linewidth=1.0, alpha=0.8)
+        # Everything left of this line is instrument, not engine.
+        floor = (timer.get("overhead") or {}).get("p50")
+        if floor:
+            ax.axvline(floor, color=CRITICAL, linestyle="--", linewidth=1.1, alpha=0.9)
+
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_xlabel(f"latency per operation ({unit}, log)")
+        ax.set_ylabel("count (log)")
+
+        title = scenario
+        instrumented = run.get("ns_per_op")
+        raw = raw_ns.get(scenario)
+        if instrumented and raw:
+            title += (f" — {instrumented:.0f} ns/op instrumented, {raw:.0f} raw "
+                      f"(+{(instrumented - raw) / raw * 100:.0f}%)")
+        ax.set_title(title)
+
+    for ax in axes[len(scenarios):]:
+        ax.set_visible(False)
+
+    handles = [Patch(facecolor=c, alpha=0.35, edgecolor=c, label=OP_LABELS[k])
+               for k, c in OP_KINDS]
+    handles += [Line2D([], [], color=INK2, linestyle=s, label=f"{n} (all kinds)")
+                for _, s, n in QUANTILE_MARKS]
+    if (timer.get("overhead") or {}).get("p50"):
+        handles.append(Line2D([], [], color=CRITICAL, linestyle="--",
+                              label="timer floor"))
+    fig.legend(handles=handles, loc="lower center", ncol=min(4, len(handles)),
+               bbox_to_anchor=(0.5, -0.02))
+
+    suptitle = (f"flash1 per-operation latency — {run_label(record)}, "
+                f"{lat.get('workload', {}).get('count', '?')} orders/scenario")
+    fig.suptitle(suptitle, fontsize=11, color=INK)
+    if not in_ns:
+        fig.text(0.5, 0.955, "TSC rate could not be verified — x axis is ticks, not time",
+                 ha="center", fontsize=9, color=CRITICAL)
+    fig.tight_layout(rect=(0, 0.02, 1, 0.96))
+    savefig(fig, plots_dir, "flash1_latency", svg)
+    return True
+
+
 # ---------------------------------------------------------------------- main
 
 
@@ -549,6 +770,12 @@ def main(argv=None):
         written.append("gb_latest.png")
     if plot_gb_history(history, plots_dir, args.svg):
         written.append("gb_history.png")
+    # Latest-only: a distribution does not reduce to one number, so there is no
+    # trend counterpart. Note that adding one of these to HISTORY_LATENCY_NS
+    # would not work — gb_metric reads record["google_benchmark"], and these
+    # numbers live under "flash1_latency".
+    if plot_flash1_latency(latest, plots_dir, args.svg):
+        written.append("flash1_latency.png")
     print(f"plots: {plots_dir}/{{{','.join(written)}}}")
     return 0
 

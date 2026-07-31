@@ -5,12 +5,21 @@
 #   scripts/bench_pipeline.sh --full          10 flash1 reps/scenario
 #                                             (challenge-style scoring — 10 reps is
 #                                             what the official run_challenge.py uses)
-#   scripts/bench_pipeline.sh --skip-flash1   Google Benchmark suite only
+#   scripts/bench_pipeline.sh --skip-flash1   skip the flash1 harness perf runs
+#   scripts/bench_pipeline.sh --skip-hist     skip the flash1 per-op latency
+#                                             distribution (independent of
+#                                             --skip-flash1; pass both for the
+#                                             microbenchmarks alone)
 #   scripts/bench_pipeline.sh --net           also run the network latency bench
 #   scripts/bench_pipeline.sh --plot-only     re-render plots from existing records
 #
 # exchange_bench always runs at --benchmark_repetitions=1, in both modes; only
 # the flash1 rep count varies.
+#
+# exchange_bench is invoked TWICE, on purpose. The default suite excludes the
+# flash1 replay benchmarks, and a second filtered run does only those — they
+# replay a 2M-message stream and would otherwise add minutes to, and share a
+# process with, the microbenchmarks whose numbers this pipeline trends.
 #
 # Output: one record JSON in bench/results/ (gitignored) + PNGs in
 # bench/results/plots/. Plotting runs via uv (deps inline in plot_bench.py).
@@ -26,17 +35,19 @@ MODE=quick
 # --full matches run_challenge.py's 10.
 REPS=5
 SKIP_FLASH1=0
+SKIP_HIST=0
 PLOT_ONLY=0
 RUN_NET=0
 for arg in "$@"; do
   case "${arg}" in
     --full) MODE=full; REPS=10 ;;
     --skip-flash1) SKIP_FLASH1=1 ;;
+    --skip-hist) SKIP_HIST=1 ;;
     --net) RUN_NET=1 ;;
     --plot-only) PLOT_ONLY=1 ;;
     *)
       echo "error: unknown flag '${arg}'" >&2
-      sed -n '2,16p' "${BASH_SOURCE[0]}" >&2
+      sed -n '2,25p' "${BASH_SOURCE[0]}" >&2
       exit 1
       ;;
   esac
@@ -62,15 +73,41 @@ DIRTY=false
 # cmake --preset resolves CMakePresets.json from the CWD, hence the cd.
 (cd "${REPO_ROOT}" && cmake --preset release && cmake --build --preset bench)
 GB_JSON="$(mktemp /tmp/exchange_gb.XXXXXX.json)"
-trap 'rm -f "${GB_JSON}"' EXIT
+HIST_JSON="$(mktemp /tmp/exchange_hist.XXXXXX.json)"
+# One trap, both files: a second `trap ... EXIT` silently REPLACES the first.
+trap 'rm -f "${GB_JSON}" "${HIST_JSON}"' EXIT
 # One repetition: the record carries a single `iteration` row per benchmark and
 # no aggregates, which is the shape plot_bench.py falls back to (gb_entries) and
 # which leaves gb_stddev returning None, so the trend chart draws no spread band.
 # --benchmark_display_aggregates_only is deliberately absent — with one
 # repetition there are no aggregates for it to display.
+#
+# The leading '-' is Google Benchmark's negative filter: this run is everything
+# EXCEPT the flash1 replay, which the second invocation below owns.
 "${REPO_ROOT}/build/release/bench/google/exchange_bench" \
+  --benchmark_filter='-^BM_Flash1_' \
   --benchmark_format=console --benchmark_out_format=json --benchmark_out="${GB_JSON}" \
   --benchmark_repetitions=1
+
+# --- flash1 per-operation latency distribution (the other exchange_bench run) ---
+# Its Google Benchmark JSON is deliberately discarded: what this run produces is
+# the sidecar histogram, and folding a 2M-message replay into the microbenchmark
+# record would put it in the bar chart next to 40 ns fixtures.
+HIST_ARG=()
+if [[ "${SKIP_HIST}" -eq 1 ]]; then
+  echo "latency distribution: skipped (--skip-hist)"
+elif [[ ! -x "${HARNESS_DIR}/generator" ]]; then
+  echo "warning: flash1 harness not fetched (scripts/fetch_harness.sh); skipping latency distribution" >&2
+else
+  echo "--- flash1 per-operation latency distribution ---"
+  "${REPO_ROOT}/build/release/bench/google/exchange_bench" \
+    --benchmark_filter='^BM_Flash1_' \
+    --benchmark_format=console \
+    --benchmark_repetitions=1 \
+    --harness-dir "${HARNESS_DIR}" \
+    --hist-json "${HIST_JSON}"
+  HIST_ARG=(--hist-json "${HIST_JSON}")
+fi
 
 # --- flash1 harness (perf mode; audit measures correctness, not throughput) ---
 FLASH1_RESULTS=()
@@ -115,6 +152,7 @@ fi
 uv run "${REPO_ROOT}/scripts/plot_bench.py" \
   --gb-json "${GB_JSON}" \
   --flash1-results ${FLASH1_RESULTS[@]+"${FLASH1_RESULTS[@]}"} \
+  ${HIST_ARG[@]+"${HIST_ARG[@]}"} \
   --harness-commit "${HARNESS_COMMIT}" \
   --sha "${SHA}" --dirty "${DIRTY}" --timestamp "${TS}" \
   --mode "${MODE}" --reps "${REPS}"
