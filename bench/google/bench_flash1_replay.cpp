@@ -59,6 +59,10 @@ Opt-in, because a 2M-message replay does not belong in the default suite:
 #include <string_view>
 #include <vector>
 
+// For makeOrderBook: this file is backfilled against engines predating Symbol,
+// where a book names no instrument. See the guard at the top of
+// BenchSupport.hpp.
+#include "BenchSupport.hpp"
 #include "Flash1Bench.hpp"
 #include "Flash1Workload.hpp"
 #include "LatencyHistogram.hpp"
@@ -71,7 +75,6 @@ Opt-in, because a 2M-message replay does not belong in the default suite:
 #include "types/OrderQuantity.hpp"
 #include "types/OrderSide.hpp"
 #include "types/OrderTime.hpp"
-#include "types/Symbol.hpp"
 
 using namespace Exchange::Bench;
 using namespace Exchange::Engine;
@@ -347,7 +350,7 @@ void flash1Bench(benchmark::State& state, std::string_view scenario) {
   */
   while (state.KeepRunningBatch(static_cast<int64_t>(records.size()))) {
     state.PauseTiming();
-    book.emplace(Symbol{"FLASH1"});
+    book = makeOrderBook("FLASH1");
     for (LatencyHistogram& histogram : histograms) histogram.reset();
     state.ResumeTiming();
 

@@ -100,11 +100,12 @@ inline OrderTime seqTime(uint64_t seq) {
 inline std::mt19937_64 benchRng() { return std::mt19937_64{42}; }
 
 // An empty book, however this engine spells one. See the guard above.
-inline OrderBook makeOrderBook() {
+inline OrderBook makeOrderBook(const char* name = "BENCH") {
 #ifdef EXCHANGE_BENCH_HAS_SYMBOL
-  return OrderBook{Symbol{"BENCH"}};
+  return OrderBook{Symbol{name}};
 #else
-  return OrderBook{};  // pre-a925d17: no Symbol, default-constructible
+  (void)name;          // pre-a925d17: a book names no instrument
+  return OrderBook{};  // no Symbol, default-constructible
 #endif
 }
 

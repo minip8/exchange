@@ -93,7 +93,17 @@ def parse_args(argv):
     p.add_argument("--reps", type=int, default=1)
     p.add_argument("--out-dir", type=Path, default=Path(__file__).resolve().parent.parent / "bench" / "results")
     p.add_argument("--svg", action="store_true", help="also write SVG next to each PNG")
+    p.add_argument("--update-hist", action="store_true",
+                   help="merge --hist-json into --sha's newest existing record, in place, "
+                        "instead of writing a new one")
     args = p.parse_args(argv)
+    if args.update_hist:
+        if not (args.sha and args.hist_json):
+            p.error("--update-hist requires --sha and --hist-json")
+        if args.gb_json or args.timestamp:
+            p.error("--update-hist rewrites an existing record; it takes neither "
+                    "--gb-json nor --timestamp")
+        return args
     if args.gb_json and not (args.sha and args.timestamp):
         p.error("--gb-json requires --sha and --timestamp")
     if bool(args.sha) != bool(args.timestamp):
@@ -174,15 +184,20 @@ def commit_dirs(out_dir):
                   if d.is_dir() and COMMIT_DIR_RE.match(d.name))
 
 
-def write_record(record, out_dir, timestamp):
-    suffix = "-dirty" if record["git_dirty"] else ""
-    dest = commit_dir(out_dir, record["git_sha_short"])
-    dest.mkdir(parents=True, exist_ok=True)
-    path = dest / f"run_{timestamp}_{record['git_sha_short']}{suffix}.json"
+def save_record(record, path):
+    """Atomic write, via a .json.tmp sibling in the same directory."""
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(record, indent=2) + "\n")
     os.replace(tmp, path)
     return path
+
+
+def write_record(record, out_dir, timestamp):
+    suffix = "-dirty" if record["git_dirty"] else ""
+    dest = commit_dir(out_dir, record["git_sha_short"])
+    dest.mkdir(parents=True, exist_ok=True)
+    return save_record(
+        record, dest / f"run_{timestamp}_{record['git_sha_short']}{suffix}.json")
 
 
 def read_record(path):
@@ -809,7 +824,24 @@ def main(argv=None):
     out_dir.mkdir(parents=True, exist_ok=True)
 
     record = record_path = None
-    if args.sha:
+    if args.update_hist:
+        # The latency distribution is expensive and orthogonal to the throughput
+        # numbers, so it can be measured on its own pass and folded into a record
+        # that already exists. `flash1_latency` is an additive key (see
+        # assemble_record), which is exactly what makes this safe.
+        found = latest_in(commit_dir(out_dir, args.sha[:7]))
+        if not found:
+            print(f"error: no record for {args.sha[:7]} in {out_dir} — "
+                  "run scripts/bench_backfill.sh for it first", file=sys.stderr)
+            return 1
+        record, record_path = found
+        try:
+            record["flash1_latency"] = json.loads(args.hist_json.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"error: unreadable hist json {args.hist_json}: {e}", file=sys.stderr)
+            return 1
+        save_record(record, record_path)
+    elif args.sha:
         record = assemble_record(args)
         record_path = write_record(record, out_dir, args.timestamp)
 

@@ -4,7 +4,15 @@
 #   scripts/bench_backfill.sh                 backfill the default commit set
 #   scripts/bench_backfill.sh <sha> [<sha>…]  backfill specific commits
 #   scripts/bench_backfill.sh --flash1-reps N flash1 perf reps/scenario (default 5)
-#   scripts/bench_backfill.sh --skip-flash1   Google Benchmark suite only
+#   scripts/bench_backfill.sh --skip-flash1   skip the flash1 harness perf runs
+#   scripts/bench_backfill.sh --skip-hist     skip the per-op latency distribution
+#   scripts/bench_backfill.sh --hist-only     ONLY the latency distribution, merged
+#                                             into each commit's existing record
+#
+# --hist-only exists because the distribution is expensive and orthogonal to the
+# throughput numbers: it folds the additive flash1_latency key into a record that
+# already exists, so a commit measured in one sitting keeps those numbers (and
+# anything quoting them) rather than being re-measured on a different day.
 #
 # exchange_bench always runs at --benchmark_repetitions=1; only the flash1 rep
 # count is tunable.
@@ -29,25 +37,30 @@
 #
 # Range limit, and why there are two build paths:
 #
-#   bench_matching_engine.cpp needs Symbol (a925d17), bench_ring.cpp needs
-#   net_protocol (560595f), and bench_flash1_replay.cpp needs both. Those three
-#   cannot be built against an older engine at all.
+#   bench_matching_engine.cpp needs Symbol (a925d17) and bench_ring.cpp needs
+#   net_protocol (560595f). Neither can be built against an older engine.
 #
-#   bench_orderbook.cpp can. The engine API it uses — addOrder, removeOrder,
-#   modifyOrder, contains, buys()/sells() — is unchanged all the way back to
-#   612785f; only book *construction* differs, which BenchSupport.hpp handles
-#   with a __has_include guard. So pre-preset commits get a reduced,
-#   OrderBook-only suite: 9 benchmarks covering every curated HISTORY_LATENCY_NS
-#   metric plus BM_MixedWorkload_SteadyState. Only
+#   bench_orderbook.cpp and bench_flash1_replay.cpp can. The engine API they use
+#   — addOrder, removeOrder, modifyOrder, contains, buys()/sells() — is unchanged
+#   all the way back to 612785f; only book *construction* differs, which
+#   BenchSupport.hpp handles with a __has_include guard. The replay qualifies for
+#   a second reason worth knowing: replayStream touches only addOrder,
+#   removeOrder and Fill, never buys()/sells(), so it is layout-independent in a
+#   way the flash1 adapter is not, and one identical instrument runs at every
+#   point in the range. So pre-preset commits get a reduced OrderBook-only suite
+#   — 9 benchmarks covering every curated HISTORY_LATENCY_NS metric plus
+#   BM_MixedWorkload_SteadyState — and the full latency distribution. Only
 #   BM_Engine_MultiBook_SteadyState is missing from those points on the trend.
 #
-# A tree is "legacy" iff it has no CMakePresets.json. Those trees also have a
-# flat bench/ with no google/ subdirectory, and their bench/CMakeLists.txt
-# already pins googlebenchmark v1.9.5, links benchmark::benchmark_main and sets
-# -O3 -march=native — identical to HEAD's — so it is left untouched and only the
-# sources are swapped. Their debug_options gates every sanitizer behind
-# $<$<CONFIG:Debug>>, so a plain -DCMAKE_BUILD_TYPE=Release build is
-# sanitizer-free, exactly as the release preset is.
+# A tree is "legacy" iff it has no CMakePresets.json. Those trees have a flat
+# bench/ with no google/ subdirectory, and their bench/CMakeLists.txt names
+# bench_matching_engine.cpp and links benchmark::benchmark_main — but --hist-json
+# is parsed by our own bench_main.cpp, so that file is REPLACED rather than
+# reused. The replacement is generated from HEAD's settings (same googlebenchmark
+# v1.9.5 pin, same -O3 -march=native) so it cannot drift from the modern path.
+# Their debug_options gates every sanitizer behind $<$<CONFIG:Debug>>, so a plain
+# -DCMAKE_BUILD_TYPE=Release build is sanitizer-free, exactly as the release
+# preset is.
 #
 # Run this on an idle machine in one sitting. The whole point is cross-run
 # comparability, and thermal or scheduler drift between commits defeats it.
@@ -66,17 +79,25 @@ DEFAULT_COMMITS=(f8c5fb6 c842652 2e0115e 586ecc6 cb5c9ca HEAD)
 
 FLASH1_REPS=5
 SKIP_FLASH1=0
+SKIP_HIST=0
+HIST_ONLY=0
 SCENARIOS=(static normal swing-25 swing-40 flash-crash)
 COMMITS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --flash1-reps) FLASH1_REPS="$2"; shift 2 ;;
     --skip-flash1) SKIP_FLASH1=1; shift ;;
+    --skip-hist) SKIP_HIST=1; shift ;;
+    --hist-only) HIST_ONLY=1; shift ;;
     -h|--help) sed -n '2,35p' "${BASH_SOURCE[0]}"; exit 0 ;;
     -*) echo "error: unknown flag '$1'" >&2; exit 1 ;;
     *) COMMITS+=("$1"); shift ;;
   esac
 done
+if [[ "${HIST_ONLY}" -eq 1 && "${SKIP_HIST}" -eq 1 ]]; then
+  echo "error: --hist-only and --skip-hist contradict each other" >&2
+  exit 1
+fi
 [[ ${#COMMITS[@]} -eq 0 ]] && COMMITS=("${DEFAULT_COMMITS[@]}")
 
 HARNESS_DIR="${REPO_ROOT}/external/matching-engine-benchmark"
@@ -118,12 +139,56 @@ for ref in "${COMMITS[@]}"; do
 
   # The benchmark sources under test are this tree's, not the historical ones.
   if [[ "${LEGACY}" -eq 1 ]]; then
-    # Flat bench/, and only the two files that can compile here. The one source
-    # already named in its add_executable that cannot is blanked rather than
-    # removed, so bench/CMakeLists.txt needs no edit at all.
+    # Flat bench/, and only the sources that can compile against this engine:
+    # bench_matching_engine.cpp needs Symbol and bench_ring.cpp needs
+    # net_protocol, so neither is copied. Everything the flash1 replay needs
+    # lands beside them so its quoted includes resolve with no include-path
+    # juggling — Flash1Workload comes from bench/net/, which is standard-library
+    # only and has no engine or net dependency of its own.
     cp "${REPO_ROOT}"/bench/google/BenchSupport.hpp \
-       "${REPO_ROOT}"/bench/google/bench_orderbook.cpp "${TREE}/bench/"
-    : > "${TREE}/bench/bench_matching_engine.cpp"
+       "${REPO_ROOT}"/bench/google/bench_orderbook.cpp \
+       "${REPO_ROOT}"/bench/google/bench_main.cpp \
+       "${REPO_ROOT}"/bench/google/bench_flash1_replay.cpp \
+       "${REPO_ROOT}"/bench/google/Flash1Bench.hpp \
+       "${REPO_ROOT}"/bench/google/LatencyHistogram.hpp \
+       "${REPO_ROOT}"/bench/google/TscTimer.hpp \
+       "${REPO_ROOT}"/bench/net/Flash1Workload.hpp \
+       "${REPO_ROOT}"/bench/net/Flash1Workload.cpp "${TREE}/bench/"
+
+    # The historical bench/CMakeLists.txt names bench_matching_engine.cpp and
+    # links benchmark::benchmark_main, but --hist-json is parsed by our own
+    # bench_main.cpp — so it has to be replaced rather than left alone. Generated
+    # from HEAD's settings rather than patched, so it cannot drift from the
+    # modern path: same googlebenchmark pin, same compile options. All three
+    # legacy trees ship a byte-identical original, so this is deterministic.
+    cat > "${TREE}/bench/CMakeLists.txt" <<'LEGACY_CMAKE'
+# Generated by scripts/bench_backfill.sh. Not the historical file — see that
+# script's header for why the reduced suite exists and what it drops.
+include(FetchContent)
+FetchContent_Declare(
+  googlebenchmark
+  GIT_REPOSITORY https://github.com/google/benchmark.git
+  GIT_TAG v1.9.5
+)
+set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+set(BENCHMARK_ENABLE_GTEST_TESTS OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(googlebenchmark)
+
+# benchmark_main is deliberately absent: bench_main.cpp supplies main() so the
+# binary accepts --hist-json.
+add_executable(exchange_bench
+  bench_orderbook.cpp
+  bench_main.cpp
+  bench_flash1_replay.cpp
+  Flash1Workload.cpp
+)
+target_link_libraries(exchange_bench PRIVATE engine benchmark::benchmark)
+find_package(Threads REQUIRED)
+target_link_libraries(exchange_bench PRIVATE Threads::Threads)
+target_compile_options(exchange_bench PRIVATE -O3 -march=native)
+
+add_subdirectory(flash1)
+LEGACY_CMAKE
   else
     cp "${REPO_ROOT}"/bench/google/*.cpp "${REPO_ROOT}"/bench/google/*.hpp \
        "${REPO_ROOT}"/bench/google/CMakeLists.txt "${TREE}/bench/google/"
@@ -151,14 +216,49 @@ for ref in "${COMMITS[@]}"; do
     BENCH_BIN="${TREE}/build/release/bench/google/exchange_bench"
   fi
 
+  # --- flash1 per-operation latency distribution ---
+  #
+  # A SEPARATE invocation, exactly as in bench_pipeline.sh: this one replays a
+  # 2M-message stream and reports instrumented times, and its Google Benchmark
+  # JSON is discarded. --hist-count is deliberately left at its 1,000,000
+  # default at every commit — distributions are only comparable at equal counts.
+  HIST_ARG=()
+  HIST_JSON="${WORK_DIR}/${SHORT}.hist.json"
+  if [[ "${SKIP_HIST}" -eq 1 ]]; then
+    :
+  elif [[ ! -x "${HARNESS_DIR}/generator" ]]; then
+    echo "warning: flash1 harness not fetched; skipping latency distribution" >&2
+  else
+    echo "--- flash1 per-operation latency distribution (${SHORT}) ---"
+    "${BENCH_BIN}" \
+      --benchmark_filter='^BM_Flash1_' \
+      --benchmark_format=console --benchmark_repetitions=1 \
+      --harness-dir "${HARNESS_DIR}" --hist-json "${HIST_JSON}"
+    HIST_ARG=(--hist-json "${HIST_JSON}")
+  fi
+
+  # --hist-only stops here: the distribution is folded into the record this
+  # commit already has, leaving its throughput numbers — and anything quoting
+  # them — untouched. flash1_latency is an additive key, which is what makes
+  # merging into an existing record safe.
+  if [[ "${HIST_ONLY}" -eq 1 ]]; then
+    if [[ ${#HIST_ARG[@]} -eq 0 ]]; then
+      echo "error: --hist-only produced no distribution for ${SHORT}" >&2
+      exit 1
+    fi
+    (cd "${REPO_ROOT}" && uv run scripts/plot_bench.py \
+        --update-hist --sha "${SHA}" "${HIST_ARG[@]}")
+    git -C "${REPO_ROOT}" worktree remove --force "${TREE}"
+    continue
+  fi
+
   GB_JSON="${WORK_DIR}/${SHORT}.json"
   # One repetition, so the JSON carries a single `iteration` row per benchmark
   # and no aggregates. --benchmark_display_aggregates_only is deliberately
   # absent — with one repetition there are no aggregates for it to display.
   #
-  # The negative filter matches bench_pipeline.sh: BM_Flash1_ replays a 2M-message
-  # stream and reports instrumented times, so it does not belong in the record
-  # being trended. (Legacy trees never build it, and the filter is a no-op there.)
+  # The negative filter matches bench_pipeline.sh: BM_Flash1_ belongs to the
+  # sidecar above, not to the record being trended.
   "${BENCH_BIN}" \
     --benchmark_filter='-^BM_Flash1_' \
     --benchmark_format=console --benchmark_out_format=json --benchmark_out="${GB_JSON}" \
@@ -189,7 +289,8 @@ for ref in "${COMMITS[@]}"; do
     done
   fi
 
-  PLOT_ARGS=(--gb-json "${GB_JSON}" --sha "${SHA}" --timestamp "${TS}" --mode quick)
+  PLOT_ARGS=(--gb-json "${GB_JSON}" --sha "${SHA}" --timestamp "${TS}" --mode quick
+             ${HIST_ARG[@]+"${HIST_ARG[@]}"})
   if [[ ${#FLASH1_ARGS[@]} -gt 0 ]]; then
     PLOT_ARGS+=(--reps "${FLASH1_REPS}" --harness-commit "${HARNESS_COMMIT}"
                 --flash1-results "${FLASH1_ARGS[@]}")
