@@ -45,7 +45,23 @@ The two fixture patterns:
 #include "types/OrderQuantity.hpp"
 #include "types/OrderSide.hpp"
 #include "types/OrderTime.hpp"
+
+/*
+`Symbol` arrived in a925d17; before that `OrderBook` was default-constructible
+and named no instrument. scripts/bench_backfill.sh compiles *this* file against
+those older engines (see its legacy path), so book construction is the one thing
+here that has to know which era it is in.
+
+Nothing else does. Every operation these fixtures measure — addOrder,
+removeOrder, modifyOrder, buys()/sells() — has the same signature at both ends
+of the range, and this guard touches only fixture *construction*, never a timed
+region. That is what keeps the measuring instrument identical across the trend,
+which is the rule bench_backfill.sh exists to protect.
+*/
+#if __has_include("types/Symbol.hpp")
 #include "types/Symbol.hpp"
+#define EXCHANGE_BENCH_HAS_SYMBOL 1
+#endif
 
 namespace Exchange::Bench {
 
@@ -83,6 +99,15 @@ inline OrderTime seqTime(uint64_t seq) {
 // machine noise.
 inline std::mt19937_64 benchRng() { return std::mt19937_64{42}; }
 
+// An empty book, however this engine spells one. See the guard above.
+inline OrderBook makeOrderBook() {
+#ifdef EXCHANGE_BENCH_HAS_SYMBOL
+  return OrderBook{Symbol{"BENCH"}};
+#else
+  return OrderBook{};  // pre-a925d17: no Symbol, default-constructible
+#endif
+}
+
 /*
 Builds a book with `depth` non-crossing price levels per side, each holding
 `orders_per_level` orders of `quantity`, centred on `kMid`.
@@ -93,9 +118,8 @@ precondition `addOrder` documents.
 */
 inline OrderBook makeBook(uint64_t& seq, std::size_t depth,
                           std::size_t orders_per_level = 1,
-                          OrderQuantity::T quantity = 100,
-                          Symbol symbol = Symbol{"BENCH"}) {
-  OrderBook book{symbol};
+                          OrderQuantity::T quantity = 100) {
+  OrderBook book{makeOrderBook()};
   // Descending `i` means prices are added *worst first* on both sides, which is
   // the order the level vectors are already kept in — so every fixture insert
   // is a push_back. Building best-price-first instead makes each insert land at
@@ -120,9 +144,8 @@ correct.
 */
 inline OrderBook makeSellBook(uint64_t& seq, std::size_t depth,
                               std::size_t orders_per_level = 1,
-                              OrderQuantity::T quantity = 100,
-                              Symbol symbol = Symbol{"BENCH"}) {
-  OrderBook book{symbol};
+                              OrderQuantity::T quantity = 100) {
+  OrderBook book{makeOrderBook()};
   // Worst (highest) offer first — see makeBook.
   for (std::size_t i = depth; i-- > 0;) {
     for (std::size_t n = 0; n < orders_per_level; ++n) {
@@ -133,7 +156,16 @@ inline OrderBook makeSellBook(uint64_t& seq, std::size_t depth,
   return book;
 }
 
-// Ids of every order resting on the bid side, best level first.
+/*
+Ids of every order resting on the bid side, best level first.
+
+"Best first" holds only from 586ecc6 onwards, which reversed the level ordering.
+Backfilled against an older engine this yields worst-first instead. Harmless:
+both callers (BM_ModifyOrder, BM_MixedWorkload_SteadyState) use the result as an
+unordered pool or take a midpoint from it, so neither depends on which end is
+which. The two _AtDepth benchmarks, which *do* care, sidestep this entirely by
+addressing their level by price rather than by position.
+*/
 inline std::vector<OrderId> restingBuyIds(const OrderBook& book) {
   std::vector<OrderId> ids;
   const auto levels = book.buys();

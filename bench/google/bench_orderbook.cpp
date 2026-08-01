@@ -25,7 +25,6 @@ Build and run Release only; a sanitized number here is meaningless:
 #include "types/OrderPrice.hpp"
 #include "types/OrderQuantity.hpp"
 #include "types/OrderSide.hpp"
-#include "types/Symbol.hpp"
 
 using namespace Exchange::Bench;
 using namespace Exchange::Engine;
@@ -47,7 +46,7 @@ constexpr std::size_t kMatchBatch{32};
 // there is no fixture to rebuild and no timer manipulation anywhere.
 // ---------------------------------------------------------------------
 static void BM_AddRemove_EmptyBook(benchmark::State& state) {
-  OrderBook book{Symbol{"BENCH"}};
+  OrderBook book{makeOrderBook()};
   uint64_t seq{0};
 
   for (auto _ : state) {

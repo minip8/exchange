@@ -27,9 +27,27 @@
 #   the same commit; pinning HEAD's adapter onto an older engine would read the
 #   worst price as the best one and the run would be wrong, not merely stale.
 #
-# Range limit: the current bench sources need Symbol (a925d17) and net_protocol
-# (560595f), so commits older than those cannot be backfilled — they will fail to
-# compile rather than silently measure something else.
+# Range limit, and why there are two build paths:
+#
+#   bench_matching_engine.cpp needs Symbol (a925d17), bench_ring.cpp needs
+#   net_protocol (560595f), and bench_flash1_replay.cpp needs both. Those three
+#   cannot be built against an older engine at all.
+#
+#   bench_orderbook.cpp can. The engine API it uses — addOrder, removeOrder,
+#   modifyOrder, contains, buys()/sells() — is unchanged all the way back to
+#   612785f; only book *construction* differs, which BenchSupport.hpp handles
+#   with a __has_include guard. So pre-preset commits get a reduced,
+#   OrderBook-only suite: 9 benchmarks covering every curated HISTORY_LATENCY_NS
+#   metric plus BM_MixedWorkload_SteadyState. Only
+#   BM_Engine_MultiBook_SteadyState is missing from those points on the trend.
+#
+# A tree is "legacy" iff it has no CMakePresets.json. Those trees also have a
+# flat bench/ with no google/ subdirectory, and their bench/CMakeLists.txt
+# already pins googlebenchmark v1.9.5, links benchmark::benchmark_main and sets
+# -O3 -march=native — identical to HEAD's — so it is left untouched and only the
+# sources are swapped. Their debug_options gates every sanitizer behind
+# $<$<CONFIG:Debug>>, so a plain -DCMAKE_BUILD_TYPE=Release build is
+# sanitizer-free, exactly as the release preset is.
 #
 # Run this on an idle machine in one sitting. The whole point is cross-run
 # comparability, and thermal or scheduler drift between commits defeats it.
@@ -95,9 +113,21 @@ for ref in "${COMMITS[@]}"; do
   git -C "${REPO_ROOT}" worktree prune
   git -C "${REPO_ROOT}" worktree add --detach "${TREE}" "${SHA}" >/dev/null
 
+  LEGACY=0
+  [[ -f "${TREE}/CMakePresets.json" ]] || LEGACY=1
+
   # The benchmark sources under test are this tree's, not the historical ones.
-  cp "${REPO_ROOT}"/bench/google/*.cpp "${REPO_ROOT}"/bench/google/*.hpp \
-     "${REPO_ROOT}"/bench/google/CMakeLists.txt "${TREE}/bench/google/"
+  if [[ "${LEGACY}" -eq 1 ]]; then
+    # Flat bench/, and only the two files that can compile here. The one source
+    # already named in its add_executable that cannot is blanked rather than
+    # removed, so bench/CMakeLists.txt needs no edit at all.
+    cp "${REPO_ROOT}"/bench/google/BenchSupport.hpp \
+       "${REPO_ROOT}"/bench/google/bench_orderbook.cpp "${TREE}/bench/"
+    : > "${TREE}/bench/bench_matching_engine.cpp"
+  else
+    cp "${REPO_ROOT}"/bench/google/*.cpp "${REPO_ROOT}"/bench/google/*.hpp \
+       "${REPO_ROOT}"/bench/google/CMakeLists.txt "${TREE}/bench/google/"
+  fi
 
   # external/ is gitignored, so a fresh worktree has none. Share the main tree's:
   # the harness is pinned and is the one thing that must NOT vary across commits.
@@ -106,23 +136,44 @@ for ref in "${COMMITS[@]}"; do
   # so a later symlink leaves the target silently missing.
   [[ "${SKIP_FLASH1}" -eq 0 ]] && ln -sfn "${REPO_ROOT}/external" "${TREE}/external"
 
-  # cmake --preset resolves CMakePresets.json from the CWD, so each worktree
-  # configures and builds into its own build/release/ and the main tree is
-  # untouched.
-  (cd "${TREE}" && cmake --preset release >/dev/null && cmake --build --preset bench >/dev/null)
+  if [[ "${LEGACY}" -eq 1 ]]; then
+    # build-release/ is where this commit's own run_flash1.sh looks, so the two
+    # builds share one configured tree.
+    cmake -S "${TREE}" -B "${TREE}/build-release" -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release >/dev/null
+    cmake --build "${TREE}/build-release" --target exchange_bench >/dev/null
+    BENCH_BIN="${TREE}/build-release/bench/exchange_bench"
+  else
+    # cmake --preset resolves CMakePresets.json from the CWD, so each worktree
+    # configures and builds into its own build/release/ and the main tree is
+    # untouched.
+    (cd "${TREE}" && cmake --preset release >/dev/null && cmake --build --preset bench >/dev/null)
+    BENCH_BIN="${TREE}/build/release/bench/google/exchange_bench"
+  fi
 
   GB_JSON="${WORK_DIR}/${SHORT}.json"
   # One repetition, so the JSON carries a single `iteration` row per benchmark
   # and no aggregates. --benchmark_display_aggregates_only is deliberately
   # absent — with one repetition there are no aggregates for it to display.
-  "${TREE}/build/release/bench/google/exchange_bench" \
+  #
+  # The negative filter matches bench_pipeline.sh: BM_Flash1_ replays a 2M-message
+  # stream and reports instrumented times, so it does not belong in the record
+  # being trended. (Legacy trees never build it, and the filter is a no-op there.)
+  "${BENCH_BIN}" \
+    --benchmark_filter='-^BM_Flash1_' \
     --benchmark_format=console --benchmark_out_format=json --benchmark_out="${GB_JSON}" \
     --benchmark_repetitions=1
 
   # --- flash1, using this commit's own adapter (see the header) ---
   FLASH1_ARGS=()
   if [[ "${SKIP_FLASH1}" -eq 0 ]]; then
-    (cd "${TREE}" && cmake --build --preset flash1 >/dev/null)
+    if [[ "${LEGACY}" -eq 1 ]]; then
+      # No flash1 preset that far back; the tree's own run_flash1.sh knows how to
+      # build its adapter, into the build-release/ configured above.
+      "${TREE}/scripts/run_flash1.sh" build >/dev/null
+    else
+      (cd "${TREE}" && cmake --build --preset flash1 >/dev/null)
+    fi
 
     for scenario in "${SCENARIOS[@]}"; do
       for rep in $(seq 1 "${FLASH1_REPS}"); do
@@ -149,4 +200,5 @@ for ref in "${COMMITS[@]}"; do
 done
 
 echo
-echo "backfill complete — records in bench/results/, plots in bench/results/plots/"
+echo "backfill complete — records and per-commit plots in bench/results/<shortsha>/,"
+echo "trend charts in bench/results/plots/"

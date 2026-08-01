@@ -9,7 +9,8 @@
 #   scripts/net_bench_pipeline.sh --skip-loopback  skip the egress micro-probe
 #   scripts/net_bench_pipeline.sh --plot-only      re-render from existing records
 #
-# Output: one record JSON in bench/results/net/ (gitignored) + PNGs in
+# Output: one record JSON plus this commit's own plots in
+# bench/results/net/<shortsha>/ (gitignored), and the trend chart in
 # bench/results/net/plots/. Plotting runs via uv (deps inline in
 # plot_net_bench.py).
 #

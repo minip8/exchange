@@ -87,7 +87,14 @@ gate. (Phases 0–6 additionally must not touch `OrderBook.hpp`, `Order.hpp`,
 
 `scripts/bench_pipeline.sh` runs the Google Benchmark suite (Release) plus one
 flash1 `perf` rep per scenario, writes a timestamped + git-SHA-tagged record JSON
-to gitignored `bench/results/`, and renders PNGs to `bench/results/plots/`.
+to gitignored `bench/results/<shortsha>/`, and renders PNGs.
+
+**Each measured commit owns a directory.** Its record and its snapshot plots sit
+together in `bench/results/<shortsha>/`, so one commit's data can be read on its
+own; only the cross-commit trend charts live at the root in
+`bench/results/plots/`. A commit measured more than once keeps every record —
+they differ by the timestamp in the filename — and the newest drives that
+commit's plots.
 
 ```bash
 scripts/bench_pipeline.sh                 # quick: 5 flash1 perf reps/scenario
@@ -99,8 +106,10 @@ scripts/bench_pipeline.sh --plot-only     # re-render plots from existing record
 ```
 
 `--full` is challenge-style scoring, matching `run_challenge.py`'s 10 reps.
-Plots: `bench/results/plots/{flash1_latest,flash1_history,gb_latest,gb_history,
-flash1_latency}.png`.
+Plots: `bench/results/<shortsha>/plots/{flash1,gb,flash1_latency}.png` for the
+commit measured, and `bench/results/plots/{flash1_history,gb_history}.png` for
+the trend across all of them. `--plot-only` re-renders every commit's snapshots
+from its own newest record, then the trend.
 
 Plotting needs `uv`; Python deps are declared inline in `scripts/plot_bench.py`
 (PEP 723). `--net` output is deliberately *not* folded into the record JSON — a
@@ -261,8 +270,8 @@ either way.
 ## The network benchmark pipeline
 
 `scripts/net_bench_pipeline.sh` is the `bench_pipeline.sh` equivalent for the
-network: run, record to `bench/results/net/run_<ts>_<sha>.json`, plot to
-`bench/results/net/plots/`.
+network: run, record to `bench/results/net/<shortsha>/run_<ts>_<sha>.json`, plot
+to that same directory. Same per-commit layout as the engine pipeline.
 
 ```bash
 scripts/net_bench_pipeline.sh                  # quick: 200k-order stream, all five scenarios
@@ -276,7 +285,8 @@ Quick sweeps `100000,250000,500000,1000000,0` (0 = saturation) over 200k orders;
 `--full` uses 1M orders and adds a 2 M/s point. Client scaling is `1,2,4`. The
 pipeline runs with `--spin-us 200` so the numbers measure the transport rather
 than the idle-wake policy. Plots:
-`bench/results/net/plots/{net_latency_vs_rate,net_throughput,net_scaling,net_history}.png`.
+`bench/results/net/<shortsha>/plots/{net_latency_vs_rate,net_throughput,net_scaling}.png`,
+plus `bench/results/net/plots/net_history.png` for the trend.
 
 ## Reading the results
 
@@ -314,4 +324,12 @@ noise, not a knee.
 
 `bench/results/` is gitignored. Records are timestamped and git-SHA-tagged, and
 both pipelines mark a run `dirty` if the working tree was not clean — so a
-record always says what it was measuring.
+record always says what it was measuring. Each lives in `<shortsha>/` beside the
+plots rendered from it; a directory is treated as a commit's iff its name is
+exactly seven hex characters, which is what keeps `plots/`, `net/` and
+`archive_broken_suite/` out of the history walk as siblings.
+
+Plots reach git only through `scripts/publish_bench_plots.sh`, which copies the
+per-commit PNGs the README embeds into tracked `docs/bench/<shortsha>/` and
+prints the matching markdown. Publishing is a deliberate step, so a scratch run
+never lands in the repo just because it was measured last.

@@ -21,7 +21,8 @@
 # replay a 2M-message stream and would otherwise add minutes to, and share a
 # process with, the microbenchmarks whose numbers this pipeline trends.
 #
-# Output: one record JSON in bench/results/ (gitignored) + PNGs in
+# Output: one record JSON plus this commit's own plots in
+# bench/results/<shortsha>/ (gitignored), and the cross-commit trend charts in
 # bench/results/plots/. Plotting runs via uv (deps inline in plot_bench.py).
 set -euo pipefail
 

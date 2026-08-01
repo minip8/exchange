@@ -14,22 +14,29 @@ scenario; this one plots a latency distribution across a rate sweep, and
 flattening it to a median to fit the other shape would throw away the only
 interesting part — where the knee is.
 
-One self-contained JSON record per pipeline run:
-  bench/results/net/run_<UTCts>_<shortsha>[-dirty].json
-Plots (regenerated from full history every run):
-  bench/results/net/plots/{net_latency_vs_rate,net_throughput,
-                           net_scaling,net_history}.png
+One self-contained JSON record per pipeline run, in that commit's own directory:
+  bench/results/net/<shortsha>/run_<UTCts>_<shortsha>[-dirty].json
+Snapshot plots, beside the record they were rendered from:
+  bench/results/net/<shortsha>/plots/{net_latency_vs_rate,net_throughput,
+                                      net_scaling}.png
+Trend plots, regenerated from the full history every run:
+  bench/results/net/plots/net_history.png
 """
 
 import argparse
 import json
 import math
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 NET_SCHEMA_VERSION = 1
+
+# See plot_bench.py: a commit directory is named by the short sha and nothing
+# else, which is what keeps `plots/` out of the history walk beside it.
+COMMIT_DIR_RE = re.compile(r"^[0-9a-f]{7}$")
 
 # Canonical scenario order; also the fixed color-slot assignment. Same order as
 # plot_bench.py, so a scenario is the same color in both sets of plots.
@@ -98,25 +105,55 @@ def assemble_record(args):
     }
 
 
+def commit_dir(out_dir, sha_short):
+    """Where one commit's record and snapshot plots live."""
+    return out_dir / sha_short
+
+
+def commit_dirs(out_dir):
+    """Every commit directory under the results root, in sha order."""
+    if not out_dir.is_dir():
+        return []
+    return sorted(d for d in out_dir.iterdir()
+                  if d.is_dir() and COMMIT_DIR_RE.match(d.name))
+
+
 def write_record(record, out_dir, timestamp):
     suffix = "-dirty" if record["git_dirty"] else ""
-    path = out_dir / f"run_{timestamp}_{record['git_sha_short']}{suffix}.json"
+    dest = commit_dir(out_dir, record["git_sha_short"])
+    dest.mkdir(parents=True, exist_ok=True)
+    path = dest / f"run_{timestamp}_{record['git_sha_short']}{suffix}.json"
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(record, indent=2) + "\n")
     os.replace(tmp, path)
     return path
 
 
+def read_record(path):
+    try:
+        rec = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"warning: skipping unreadable record {path}: {e}", file=sys.stderr)
+        return None
+    return rec if rec.get("net_schema") == NET_SCHEMA_VERSION else None
+
+
+def latest_in(dir_):
+    """The newest record in one commit directory, or None. See plot_bench.py."""
+    for path in sorted(dir_.glob("run_*.json"), reverse=True):
+        rec = read_record(path)
+        if rec:
+            return rec, path
+    return None
+
+
 def load_history(out_dir):
     records = []
-    for path in sorted(out_dir.glob("run_*.json")):
-        try:
-            rec = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError) as e:
-            print(f"warning: skipping unreadable record {path}: {e}", file=sys.stderr)
-            continue
-        if rec.get("net_schema") == NET_SCHEMA_VERSION:
-            records.append(rec)
+    for d in commit_dirs(out_dir):
+        for path in sorted(d.glob("run_*.json")):
+            rec = read_record(path)
+            if rec:
+                records.append(rec)
     records.sort(key=lambda r: r["timestamp_utc"])
     return records
 
@@ -415,13 +452,25 @@ def plot_history(history, plots_dir, svg):
 # ---------------------------------------------------------------------- main
 
 
+def render_snapshots(record, out_dir, svg):
+    """One commit's own plots, into that commit's directory. See plot_bench.py."""
+    plots_dir = commit_dir(out_dir, record["git_sha_short"]) / "plots"
+    written = []
+    if plot_latency_vs_rate(record, plots_dir, svg):
+        written.append("net_latency_vs_rate.png")
+    if plot_throughput(record, plots_dir, svg):
+        written.append("net_throughput.png")
+    if plot_scaling(record, plots_dir, svg):
+        written.append("net_scaling.png")
+    return plots_dir, written
+
+
 def main(argv=None):
     args = parse_args(argv)
     out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
-    plots_dir = out_dir / "plots"
 
-    record_path = None
+    record = record_path = None
     if args.net_json:
         record = assemble_record(args)
         record_path = write_record(record, out_dir, args.timestamp)
@@ -431,8 +480,10 @@ def main(argv=None):
         print(f"error: no records in {out_dir} — run scripts/net_bench_pipeline.sh first",
               file=sys.stderr)
         return 1
-    latest = history[-1]
-    print_summary(latest, record_path or "(latest existing record)")
+    # Summarise the record just written, not history[-1] — the correction
+    # plot_bench.py carries, applied here too so a backdated run cannot report
+    # some other commit's numbers under this run's heading.
+    print_summary(record or history[-1], record_path or "(latest existing record)")
 
     try:
         apply_style()
@@ -441,16 +492,19 @@ def main(argv=None):
               "(record was still written)", file=sys.stderr)
         return 3
 
-    written = []
-    if plot_latency_vs_rate(latest, plots_dir, args.svg):
-        written.append("net_latency_vs_rate.png")
-    if plot_throughput(latest, plots_dir, args.svg):
-        written.append("net_throughput.png")
-    if plot_scaling(latest, plots_dir, args.svg):
-        written.append("net_scaling.png")
-    if plot_history(history, plots_dir, args.svg):
-        written.append("net_history.png")
-    print(f"plots: {plots_dir}/{{{','.join(written)}}}")
+    if record:
+        plots_dir, written = render_snapshots(record, out_dir, args.svg)
+        print(f"plots: {plots_dir}/{{{','.join(written)}}}")
+    else:
+        for d in commit_dirs(out_dir):
+            found = latest_in(d)
+            if found:
+                render_snapshots(found[0], out_dir, args.svg)
+        print(f"plots: {out_dir}/<sha>/plots/ for {len(commit_dirs(out_dir))} commits")
+
+    trend_dir = out_dir / "plots"
+    if plot_history(history, trend_dir, args.svg):
+        print(f"trend: {trend_dir}/net_history.png")
     return 0
 
 

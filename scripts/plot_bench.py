@@ -9,23 +9,30 @@ Invoked by scripts/bench_pipeline.sh with fresh Google Benchmark JSON and
 flash1 harness result files; also runnable standalone without --gb-json to
 re-plot from the existing history in bench/results/.
 
-One self-contained JSON record per pipeline run:
-  bench/results/run_<UTCts>_<shortsha>[-dirty].json
-Plots (regenerated from full history every run):
-  bench/results/plots/{flash1_latest,flash1_history,gb_latest,gb_history,
-                       flash1_latency}.png
+One self-contained JSON record per pipeline run, in that commit's own directory:
+  bench/results/<shortsha>/run_<UTCts>_<shortsha>[-dirty].json
+Snapshot plots, beside the record they were rendered from:
+  bench/results/<shortsha>/plots/{flash1,gb,flash1_latency}.png
+Trend plots, regenerated from the full history every run:
+  bench/results/plots/{flash1_history,gb_history}.png
 """
 
 import argparse
 import json
 import math
 import os
+import re
 import statistics
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 SCHEMA_VERSION = 1
+
+# A commit directory is named by the short sha and nothing else. Matching on the
+# shape rather than keeping an allow-list is what keeps `plots/`, `net/` and
+# `archive_broken_suite/` out of the history walk as siblings under the same root.
+COMMIT_DIR_RE = re.compile(r"^[0-9a-f]{7}$")
 
 # Canonical scenario order; also the fixed color-slot assignment.
 SCENARIOS = ["static", "normal", "swing-25", "swing-40", "flash-crash"]
@@ -89,6 +96,8 @@ def parse_args(argv):
     args = p.parse_args(argv)
     if args.gb_json and not (args.sha and args.timestamp):
         p.error("--gb-json requires --sha and --timestamp")
+    if bool(args.sha) != bool(args.timestamp):
+        p.error("--sha and --timestamp go together")
     return args
 
 
@@ -96,7 +105,10 @@ def parse_args(argv):
 
 
 def assemble_record(args):
-    gb = json.loads(args.gb_json.read_text())
+    # Optional, so a run whose Google Benchmark half could not be built still
+    # records the flash1 half rather than nothing. Every reader below tolerates
+    # None; see gb_entries.
+    gb = json.loads(args.gb_json.read_text()) if args.gb_json else None
 
     flash1 = None
     raws = []
@@ -149,25 +161,62 @@ def assemble_record(args):
     }
 
 
+def commit_dir(out_dir, sha_short):
+    """Where one commit's record and snapshot plots live."""
+    return out_dir / sha_short
+
+
+def commit_dirs(out_dir):
+    """Every commit directory under the results root, in sha order."""
+    if not out_dir.is_dir():
+        return []
+    return sorted(d for d in out_dir.iterdir()
+                  if d.is_dir() and COMMIT_DIR_RE.match(d.name))
+
+
 def write_record(record, out_dir, timestamp):
     suffix = "-dirty" if record["git_dirty"] else ""
-    path = out_dir / f"run_{timestamp}_{record['git_sha_short']}{suffix}.json"
+    dest = commit_dir(out_dir, record["git_sha_short"])
+    dest.mkdir(parents=True, exist_ok=True)
+    path = dest / f"run_{timestamp}_{record['git_sha_short']}{suffix}.json"
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(record, indent=2) + "\n")
     os.replace(tmp, path)
     return path
 
 
+def read_record(path):
+    try:
+        rec = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"warning: skipping unreadable record {path}: {e}", file=sys.stderr)
+        return None
+    # load_history drops every record whose schema differs, which is why
+    # SCHEMA_VERSION does not move for additive keys — see assemble_record.
+    return rec if rec.get("schema") == SCHEMA_VERSION else None
+
+
+def latest_in(dir_):
+    """The newest record in one commit directory, or None.
+
+    Newest by filename, whose leading timestamp makes that a chronological sort.
+    A commit measured more than once keeps every record; only the newest drives
+    that commit's snapshot plots.
+    """
+    for path in sorted(dir_.glob("run_*.json"), reverse=True):
+        rec = read_record(path)
+        if rec:
+            return rec, path
+    return None
+
+
 def load_history(out_dir):
     records = []
-    for path in sorted(out_dir.glob("run_*.json")):
-        try:
-            rec = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError) as e:
-            print(f"warning: skipping unreadable record {path}: {e}", file=sys.stderr)
-            continue
-        if rec.get("schema") == SCHEMA_VERSION:
-            records.append(rec)
+    for d in commit_dirs(out_dir):
+        for path in sorted(d.glob("run_*.json")):
+            rec = read_record(path)
+            if rec:
+                records.append(rec)
     records.sort(key=lambda r: r["timestamp_utc"])
     return records
 
@@ -184,7 +233,7 @@ def gb_entries(record):
     repetition count in `name` suffixes (`X_median`), so they are re-keyed back
     to the plain benchmark name here and nowhere else needs to know.
     """
-    benchmarks = record["google_benchmark"].get("benchmarks", [])
+    benchmarks = (record.get("google_benchmark") or {}).get("benchmarks", [])
     medians = {
         b["run_name"]: b
         for b in benchmarks
@@ -202,7 +251,7 @@ def gb_entries(record):
 def gb_stddev(record, name):
     """Stddev across repetitions for one benchmark, in the entry's own units.
     None for single-repetition records, which have no aggregates."""
-    for b in record["google_benchmark"].get("benchmarks", []):
+    for b in (record.get("google_benchmark") or {}).get("benchmarks", []):
         if (
             b.get("run_type") == "aggregate"
             and b.get("aggregate_name") == "stddev"
@@ -377,7 +426,7 @@ def run_label(record):
     return record["git_sha_short"] + ("*" if record["git_dirty"] else "")
 
 
-def plot_flash1_latest(record, plots_dir, svg):
+def plot_flash1_snapshot(record, plots_dir, svg):
     import matplotlib.pyplot as plt
 
     f1 = record["flash1"]
@@ -419,7 +468,7 @@ def plot_flash1_latest(record, plots_dir, svg):
     ax.set_title(f"flash1 per-scenario throughput — {run_label(record)}  ({record['timestamp_utc']})")
     ax.legend(loc="upper right")
     ax.margins(y=0.25)
-    savefig(fig, plots_dir, "flash1_latest", svg)
+    savefig(fig, plots_dir, "flash1", svg)
 
 
 def plot_flash1_history(history, plots_dir, svg):
@@ -464,7 +513,7 @@ def plot_flash1_history(history, plots_dir, svg):
     return True
 
 
-def plot_gb_latest(record, plots_dir, svg):
+def plot_gb_snapshot(record, plots_dir, svg):
     import matplotlib.pyplot as plt
 
     ranged, flat_ns, throughput = classify_gb(record)
@@ -519,7 +568,7 @@ def plot_gb_latest(record, plots_dir, svg):
     fig.suptitle(f"Google Benchmark — {run_label(record)}  ({record['timestamp_utc']})",
                  fontsize=11, color=INK)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
-    savefig(fig, plots_dir, "gb_latest", svg)
+    savefig(fig, plots_dir, "gb", svg)
     return True
 
 
@@ -730,14 +779,37 @@ def plot_flash1_latency(record, plots_dir, svg):
 # ---------------------------------------------------------------------- main
 
 
+def render_snapshots(record, out_dir, svg):
+    """One commit's own plots, into that commit's directory.
+
+    Snapshots belong to the commit whose record produced them, never to
+    `history[-1]`. That distinction used to be invisible because everything
+    landed in one shared directory, so a backfill of an old commit would
+    overwrite the plots with whatever the newest record happened to be.
+    """
+    plots_dir = commit_dir(out_dir, record["git_sha_short"]) / "plots"
+    written = []
+    if record["flash1"]:
+        plot_flash1_snapshot(record, plots_dir, svg)
+        written.append("flash1.png")
+    if plot_gb_snapshot(record, plots_dir, svg):
+        written.append("gb.png")
+    # Snapshot-only: a distribution does not reduce to one number, so there is no
+    # trend counterpart. Note that adding one of these to HISTORY_LATENCY_NS
+    # would not work — gb_metric reads record["google_benchmark"], and these
+    # numbers live under "flash1_latency".
+    if plot_flash1_latency(record, plots_dir, svg):
+        written.append("flash1_latency.png")
+    return plots_dir, written
+
+
 def main(argv=None):
     args = parse_args(argv)
     out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
-    plots_dir = out_dir / "plots"
 
-    record_path = None
-    if args.gb_json:
+    record = record_path = None
+    if args.sha:
         record = assemble_record(args)
         record_path = write_record(record, out_dir, args.timestamp)
 
@@ -745,13 +817,11 @@ def main(argv=None):
     if not history:
         print(f"error: no records in {out_dir} — run scripts/bench_pipeline.sh first", file=sys.stderr)
         return 1
-    latest = history[-1]
     # Summarise the record just written, not history[-1]. They differ whenever a
     # backdated --timestamp is used (bench_backfill.sh always does), and printing
     # the newest-by-timestamp record there reports some *other* commit's numbers
     # under the heading of the run that just finished.
-    written_record = record if args.gb_json else latest
-    print_summary(written_record, record_path or "(latest existing record)")
+    print_summary(record or history[-1], record_path or "(latest existing record)")
 
     try:
         apply_style()
@@ -760,23 +830,25 @@ def main(argv=None):
               "(record was still written)", file=sys.stderr)
         return 3
 
-    written = []
-    if latest["flash1"]:
-        plot_flash1_latest(latest, plots_dir, args.svg)
-        written.append("flash1_latest.png")
-    if plot_flash1_history(history, plots_dir, args.svg):
-        written.append("flash1_history.png")
-    if plot_gb_latest(latest, plots_dir, args.svg):
-        written.append("gb_latest.png")
-    if plot_gb_history(history, plots_dir, args.svg):
-        written.append("gb_history.png")
-    # Latest-only: a distribution does not reduce to one number, so there is no
-    # trend counterpart. Note that adding one of these to HISTORY_LATENCY_NS
-    # would not work — gb_metric reads record["google_benchmark"], and these
-    # numbers live under "flash1_latency".
-    if plot_flash1_latency(latest, plots_dir, args.svg):
-        written.append("flash1_latency.png")
-    print(f"plots: {plots_dir}/{{{','.join(written)}}}")
+    if record:
+        plots_dir, written = render_snapshots(record, out_dir, args.svg)
+        print(f"plots: {plots_dir}/{{{','.join(written)}}}")
+    else:
+        # Re-plot mode: every commit gets its snapshots back, each from its own
+        # newest record.
+        for d in commit_dirs(out_dir):
+            found = latest_in(d)
+            if found:
+                render_snapshots(found[0], out_dir, args.svg)
+        print(f"plots: {out_dir}/<sha>/plots/ for {len(commit_dirs(out_dir))} commits")
+
+    trend_dir = out_dir / "plots"
+    trend = []
+    if plot_flash1_history(history, trend_dir, args.svg):
+        trend.append("flash1_history.png")
+    if plot_gb_history(history, trend_dir, args.svg):
+        trend.append("gb_history.png")
+    print(f"trend: {trend_dir}/{{{','.join(trend)}}}")
     return 0
 
 
