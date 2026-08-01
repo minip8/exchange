@@ -37,10 +37,11 @@ for sha in "${COMMITS[@]}"; do
   fi
   dest="${DOCS}/${sha}"
   mkdir -p "${dest}"
-  # Only the two the README embeds. flash1_latency.png is a HEAD-only artifact
-  # (bench_backfill.sh does not pass --hist-json) and would be a broken link.
+  # The three the README embeds. flash1_latency.png is present only where the
+  # distribution has been measured (bench_backfill.sh --hist-only), so it is
+  # copied when it exists and silently skipped when it does not.
   copied=()
-  for stem in flash1 gb; do
+  for stem in flash1 gb flash1_latency; do
     if [[ -f "${src}/${stem}.png" ]]; then
       cp "${src}/${stem}.png" "${dest}/${stem}.png"
       copied+=("${stem}.png")

@@ -64,6 +64,26 @@ def flash1_line(record):
     return f"flash1 M msgs/s — {' · '.join(parts)} (worst case){suffix}"
 
 
+def latency_line(record):
+    """The uninstrumented per-op cost, from the `_NoTiming` twins.
+
+    Deliberately the twin and not the instrumented row: the fences the timed
+    version needs cost ~10-90% and also forbid cross-operation overlap, so the
+    instrumented ns/op is the instrument's number, not the engine's. This is
+    also engine-only, where the flash1 M msgs/s above goes through the harness.
+    """
+    lat = record.get("flash1_latency")
+    if not lat:
+        return None
+    raw = {r["scenario"]: r.get("ns_per_op")
+           for r in lat.get("runs", []) if not r.get("instrumented")}
+    parts = [f"{sc} {raw[sc]:.0f}" for sc in SCENARIOS if raw.get(sc)]
+    if not parts:
+        return None
+    unit = "ns" if (lat.get("timer") or {}).get("units") == "ns" else "TSC ticks"
+    return f"per-op {unit} (uninstrumented) — {' · '.join(parts)}"
+
+
 def gb_line(record):
     parts = []
     for name, label in KEY_LATENCY:
@@ -84,10 +104,11 @@ def main(argv):
     for sha in argv:
         record = newest_record(sha)
         print(f"### {sha}\n")
-        for line in (flash1_line(record), gb_line(record)):
+        for line in (flash1_line(record), latency_line(record), gb_line(record)):
             if line:
                 print(f"{line}\n")
-        for stem, alt in (("flash1", "flash1 throughput"), ("gb", "microbenchmarks")):
+        for stem, alt in (("flash1", "flash1 throughput"), ("gb", "microbenchmarks"),
+                          ("flash1_latency", "per-operation latency distribution")):
             if (RESULTS / sha / "plots" / f"{stem}.png").exists():
                 print(f"![{alt}](docs/bench/{sha}/{stem}.png)")
         print()
