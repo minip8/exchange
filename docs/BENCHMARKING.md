@@ -122,6 +122,63 @@ Benchmark's negative filter) and a second run does only the flash1 replay. They
 are different processes so the microbenchmark numbers the pipeline trends are
 untouched by a 2M-message stream replay sharing their address space.
 
+## Re-measuring historical commits
+
+`bench_pipeline.sh` always records HEAD at wall-clock now, so it cannot express
+"these are commit X's numbers". `scripts/bench_backfill.sh` can: one git worktree
+per commit, this tree's benchmark sources copied in, recorded against the
+commit's own sha and **commit date** — backdated so the trend chart's x-axis
+sorts in commit order.
+
+```bash
+scripts/bench_backfill.sh                     # the default commit set
+scripts/bench_backfill.sh <sha> [<sha>…]      # specific commits
+scripts/bench_backfill.sh --flash1-reps N     # perf reps/scenario (default 5)
+scripts/bench_backfill.sh --skip-flash1       # skip the harness perf runs
+scripts/bench_backfill.sh --skip-hist         # skip the per-op latency distribution
+scripts/bench_backfill.sh --hist-only         # ONLY the distribution, merged in place
+```
+
+Run it on an idle machine **in one sitting** — cross-run comparability is the
+whole point, and thermal or scheduler drift between commits defeats it.
+
+`--hist-only` exists because the latency distribution is expensive and orthogonal
+to the throughput numbers. It builds each tree, runs only the replay pass, and
+folds the result into the record that commit already has via
+`plot_bench.py --update-hist`. `flash1_latency` is an additive key, which is what
+makes merging into an existing record safe — so a set of commits measured
+together keeps those throughput numbers, and anything quoting them stays true,
+instead of being re-measured on a different day. Normal mode runs the same pass
+inline, so a fresh backfill is complete in one go.
+
+The two suites are backfilled on **opposite rules**, and the difference is not
+arbitrary. `bench/google/` is copied in from the current tree: the benchmark code
+is the measuring instrument, so it must be identical at every point or the trend
+compares two instruments and calls the difference a performance change.
+`bench/flash1/` is left as each commit found it, because there the instrument is
+the external harness and the *adapter* is part of what is measured — it is
+coupled to the engine's layout, and pinning HEAD's adapter onto an older engine
+would read the worst price as the best one.
+
+The replay benchmark sits on the first rule, and can: `replayStream` uses only
+`addOrder`, `removeOrder` and `Fill`, never `buys()`/`sells()`, so it is
+layout-independent and one identical instrument runs at every point.
+
+How far back it reaches depends on the benchmark. `bench_matching_engine.cpp`
+needs `Symbol` (`a925d17`), `bench_ring.cpp` needs `net_protocol` (`560595f`),
+and neither can build against an older engine. `bench_orderbook.cpp` and
+`bench_flash1_replay.cpp` can — the engine API they use is unchanged back to
+`612785f`, and only book *construction* differs, which `BenchSupport.hpp` absorbs
+with a `__has_include("types/Symbol.hpp")` guard around `makeOrderBook()`. A tree
+with no `CMakePresets.json` therefore takes a **legacy path**: a flat `bench/`, a
+`bench/CMakeLists.txt` generated from HEAD's settings (same googlebenchmark pin,
+same `-O3 -march=native`, `bench_main.cpp` rather than `benchmark_main` so
+`--hist-json` is accepted), and a plain `-DCMAKE_BUILD_TYPE=Release` build that
+is sanitizer-free because those trees gate every sanitizer behind
+`$<$<CONFIG:Debug>>`. Those commits get a reduced 9-benchmark OrderBook suite
+plus the full latency distribution; only `BM_Engine_MultiBook_SteadyState` is
+missing from their trend points.
+
 ## The flash1 per-operation latency distribution
 
 Everything else in the Google Benchmark suite reports a mean over a synthetic
@@ -195,6 +252,18 @@ per kind per scenario, plus exact per-kind percentiles; `plot_bench.py --hist-js
 embeds it in the record under `flash1_latency`. That key is additive — records
 written before it exist simply lack it, which is why `SCHEMA_VERSION` did not
 move.
+
+Being additive is also what lets it arrive late. `plot_bench.py --update-hist
+--sha <sha> --hist-json <path>` loads that commit's newest record, fills the key,
+rewrites the record **at the same path** and re-renders its plots — no
+`--timestamp`, since the record already exists, and no other measurement is
+touched. That is the mechanism behind `bench_backfill.sh --hist-only`.
+
+**Quote the `_NoTiming` twin, not the timed row.** The instrumented ns/op runs
+10-90% above it, and the gap is not only the two `rdtsc` pairs — the fences also
+forbid the compiler from overlapping adjacent operations. The twin is the
+engine's number; the timed row is the instrument's. Note the twin is a *lower*
+bound for the same reason.
 
 ## Network workload benchmark
 
